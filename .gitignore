@@ -1,0 +1,15 @@
+.DS_Store
+.gradle/
+build/
+app/build/
+local.properties
+*.apk
+*.png
+
+# Extracted website/debug artifacts
+chunk-*.js
+chunk-libs*.js
+app.*.js
+app.*.css
+frontend-extract.json
+index.html
