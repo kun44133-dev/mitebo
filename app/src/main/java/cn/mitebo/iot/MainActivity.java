@@ -13,6 +13,9 @@ import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
+import android.media.Ringtone;
+import android.media.RingtoneManager;
+import android.net.Uri;
 import android.os.AsyncTask;
 import android.os.Build;
 import android.os.Bundle;
@@ -58,17 +61,23 @@ public class MainActivity extends Activity {
     private static final String BASE_URL = "http://iot.mitebo.cn/prod-api";
     private static final String PREFS = "mitebo_iot";
     private static final int BLUE = 0xff1677ff;
+    private static final int NAVY = 0xff10233f;
+    private static final int CYAN = 0xff00a6d6;
+    private static final int GREEN = 0xff10b981;
+    private static final int RED = 0xffef4444;
+    private static final int AMBER = 0xfff59e0b;
     private static final int INK = 0xff111827;
     private static final int MUTED = 0xff6b7280;
     private static final int LINE = 0xffe5e7eb;
-    private static final int PAGE_BG = 0xffeef4ff;
+    private static final int PAGE_BG = 0xfff3f6fb;
     private static final String ALARM_CHANNEL_ID = "alarm_badge";
     private static final int ALARM_NOTIFICATION_ID = 1024;
-    private static final long STATIC_PRESSURE_STABLE_MS = 20000;
+    private static final long STATIC_PRESSURE_STABLE_MS = 5000;
     private static final long DEFAULT_REFRESH_MS = 15000;
     private static final long MOULD_REFRESH_MS = 5000;
     private static final long MOULD_ACTIVE_WINDOW_MS = 5000;
     private static final double MOULD_ONLINE_PRESSURE_DELTA = 10.0;
+    private static final double STATIC_PRESSURE_DELTA = 10.0;
 
     private FrameLayout root;
     private ProgressBar loading;
@@ -87,11 +96,13 @@ public class MainActivity extends Activity {
     private int lastAlarmTotal = -1;
     private String lastSeenAlarmKey = "";
     private boolean offlineMouldMode = false;
+    private long lastAlarmSoundAt = 0;
     private final List<String> expandedMouldIds = new ArrayList<>();
     private final Map<String, Double> lastPressureByDevice = new HashMap<>();
     private final Map<String, Double> stableCandidatePressureByDevice = new HashMap<>();
     private final Map<String, Long> stableSinceByDevice = new HashMap<>();
     private final Map<String, Double> staticPressureByDevice = new HashMap<>();
+    private final Map<String, Boolean> staticPressureCapturedByDevice = new HashMap<>();
     private final Map<String, Long> activeMouldUntil = new HashMap<>();
     private final Map<String, TextView> visiblePressureViews = new HashMap<>();
     private final Map<String, TextView> visibleStandardViews = new HashMap<>();
@@ -181,14 +192,14 @@ public class MainActivity extends Activity {
 
         TextView title = new TextView(this);
         title.setText("密特堡压力监测");
-        title.setTextSize(27);
+        title.setTextSize(28);
         title.setTextColor(INK);
         title.setGravity(Gravity.CENTER);
         title.setTypeface(null, 1);
         page.addView(title, topMargin(dp(8)));
 
         TextView subtitle = new TextView(this);
-        subtitle.setText("IoT 设备、网关、模具与报警管理");
+        subtitle.setText("工业压力监测与告警管理");
         subtitle.setTextSize(15);
         subtitle.setTextColor(MUTED);
         subtitle.setGravity(Gravity.CENTER);
@@ -196,9 +207,9 @@ public class MainActivity extends Activity {
 
         LinearLayout panel = new LinearLayout(this);
         panel.setOrientation(LinearLayout.VERTICAL);
-        panel.setPadding(dp(18), dp(20), dp(18), dp(18));
-        panel.setBackground(rounded(0xffffffff, 18));
-        panel.setElevation(dp(5));
+        panel.setPadding(dp(18), dp(22), dp(18), dp(18));
+        panel.setBackground(roundedStroke(0xffffffff, 20, 0xffe6edf6));
+        panel.setElevation(dp(6));
         page.addView(panel, fixedTop(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, dp(34)));
 
         usernameInput = input("账号", false);
@@ -240,7 +251,7 @@ public class MainActivity extends Activity {
         panel.addView(tip, topMargin(dp(14)));
 
         TextView version = new TextView(this);
-        version.setText("作者 kunkun  版本号 0.0.2");
+        version.setText("作者 kunkun  版本号 0.0.3");
         version.setTextSize(13);
         version.setTextColor(0xff94a3b8);
         version.setGravity(Gravity.CENTER);
@@ -345,32 +356,47 @@ public class MainActivity extends Activity {
         page.setBackgroundColor(PAGE_BG);
 
         LinearLayout header = new LinearLayout(this);
-        header.setOrientation(LinearLayout.HORIZONTAL);
-        header.setGravity(Gravity.CENTER_VERTICAL);
-        header.setPadding(dp(16), dp(14), dp(16), dp(12));
-        header.setBackground(rounded(0xffffffff, 0));
+        header.setOrientation(LinearLayout.VERTICAL);
+        header.setPadding(dp(16), dp(18), dp(16), dp(16));
+        header.setBackground(gradient(NAVY, 0xff173b66, 0));
+
+        LinearLayout titleRow = new LinearLayout(this);
+        titleRow.setOrientation(LinearLayout.HORIZONTAL);
+        titleRow.setGravity(Gravity.BOTTOM);
+
+        LinearLayout copy = new LinearLayout(this);
+        copy.setOrientation(LinearLayout.VERTICAL);
 
         TextView title = new TextView(this);
-        title.setText(tabTitles[currentTab] + "管理");
-        title.setTextSize(21);
-        title.setTextColor(INK);
+        title.setText(tabTitles[currentTab] + "监控");
+        title.setTextSize(24);
+        title.setTextColor(0xffffffff);
         title.setTypeface(null, 1);
-        header.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        copy.addView(title);
+
+        TextView subtitle = new TextView(this);
+        subtitle.setText(tabSubtitle());
+        subtitle.setTextSize(13);
+        subtitle.setTextColor(0xffc7d8ea);
+        subtitle.setPadding(0, dp(6), 0, 0);
+        copy.addView(subtitle);
+        titleRow.addView(copy, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
 
         Button logout = smallButton("退出");
-        styleButton(logout, 0xfff8fafc, 0xff475569, LINE);
+        styleButton(logout, 0x1affffff, 0xffffffff, 0x33ffffff);
         setIcon(logout, R.drawable.ic_logout);
         logout.setOnClickListener(v -> {
             getSharedPreferences(PREFS, MODE_PRIVATE).edit().remove("token").apply();
             token = null;
             showLogin();
         });
-        header.addView(logout);
+        titleRow.addView(logout, fixedTop(dp(82), dp(38), 0));
+        header.addView(titleRow);
         page.addView(header);
 
         LinearLayout tabs = new LinearLayout(this);
         tabs.setOrientation(LinearLayout.HORIZONTAL);
-        tabs.setPadding(dp(12), dp(8), dp(12), dp(10));
+        tabs.setPadding(dp(12), dp(10), dp(12), dp(12));
         tabs.setBackgroundColor(0xffffffff);
         for (int i = 0; i < tabTitles.length; i++) {
             final int index = i;
@@ -380,10 +406,10 @@ public class MainActivity extends Activity {
             if (i == 1) {
                 alarmTabButton = tab;
             }
-            tab.setTextColor(i == currentTab ? 0xffffffff : 0xff374151);
-            int tabBg = i == currentTab ? BLUE : 0xfff8fafc;
-            int tabLine = i == currentTab ? BLUE : LINE;
-            tab.setBackground(roundedStroke(tabBg, 14, tabLine));
+            tab.setTextColor(i == currentTab ? 0xffffffff : 0xff475569);
+            int tabBg = i == currentTab ? tabAccent(i) : 0xfff8fafc;
+            int tabLine = i == currentTab ? tabAccent(i) : 0xffe2e8f0;
+            tab.setBackground(roundedStroke(tabBg, 16, tabLine));
             tab.setOnClickListener(v -> {
                 currentTab = index;
                 if (currentTab != 3) {
@@ -401,7 +427,7 @@ public class MainActivity extends Activity {
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.MATCH_PARENT
             ));
-            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, dp(44), 1);
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, dp(46), 1);
             params.leftMargin = dp(4);
             params.rightMargin = dp(4);
             tabs.addView(tabSlot, params);
@@ -410,26 +436,26 @@ public class MainActivity extends Activity {
 
         LinearLayout actions = new LinearLayout(this);
         actions.setOrientation(LinearLayout.HORIZONTAL);
-        actions.setPadding(dp(12), dp(10), dp(12), 0);
+        actions.setPadding(dp(12), dp(12), dp(12), dp(2));
         actions.setBackgroundColor(PAGE_BG);
         Button refresh = smallButton("刷新");
-        styleButton(refresh, 0xffffffff, 0xff1f2937, LINE);
+        styleButton(refresh, 0xffffffff, 0xff1f2937, 0xffdbe3ef);
         setIcon(refresh, R.drawable.ic_refresh);
         refresh.setOnClickListener(v -> loadList());
-        actions.addView(refresh, new LinearLayout.LayoutParams(0, dp(42), 1));
+        actions.addView(refresh, new LinearLayout.LayoutParams(0, dp(44), 1));
         if (currentTab == 0) {
             Button search = smallButton("MAC查询");
-            styleButton(search, 0xffeef4ff, BLUE, 0xffbfdbfe);
+            styleButton(search, 0xffedf7ff, BLUE, 0xffb8dcff);
             setIcon(search, R.drawable.ic_info);
             search.setOnClickListener(v -> showMacSearchDialog());
-            LinearLayout.LayoutParams searchParams = new LinearLayout.LayoutParams(0, dp(42), 1);
+            LinearLayout.LayoutParams searchParams = new LinearLayout.LayoutParams(0, dp(44), 1);
             searchParams.leftMargin = dp(8);
             actions.addView(search, searchParams);
         }
         if (currentTab != 1) {
             String actionText = currentTab == 0 ? "添加监控" : currentTab == 3 ? (offlineMouldMode ? "在线模具" : "离线模具") : "新增" + tabTitles[currentTab];
             Button add = smallButton(actionText);
-            styleButton(add, BLUE, 0xffffffff, BLUE);
+            styleButton(add, tabAccent(currentTab), 0xffffffff, tabAccent(currentTab));
             setIcon(add, currentTab == 3 ? R.drawable.ic_mould : R.drawable.ic_add);
             if (currentTab == 0) {
                 add.setOnClickListener(v -> showAddMonitorDeviceDialog());
@@ -442,7 +468,7 @@ public class MainActivity extends Activity {
             } else {
                 add.setOnClickListener(v -> loadOptionsForEdit(null));
             }
-            LinearLayout.LayoutParams addParams = new LinearLayout.LayoutParams(0, dp(42), 1);
+            LinearLayout.LayoutParams addParams = new LinearLayout.LayoutParams(0, dp(44), 1);
             addParams.leftMargin = dp(8);
             actions.addView(add, addParams);
         }
@@ -451,7 +477,7 @@ public class MainActivity extends Activity {
         ScrollView scroll = new ScrollView(this);
         content = new LinearLayout(this);
         content.setOrientation(LinearLayout.VERTICAL);
-        content.setPadding(dp(12), dp(10), dp(12), dp(24));
+        content.setPadding(dp(12), dp(8), dp(12), dp(24));
         scroll.addView(content);
         page.addView(scroll, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -572,12 +598,50 @@ public class MainActivity extends Activity {
                 }
                 lastAlarmTotal = json.optInt("total", rows == null ? 0 : rows.length());
                 updateLauncherAlarmBadge();
+                if (unreadAlarmCount > oldUnread) {
+                    playAlarmSound();
+                }
                 if (oldUnread != unreadAlarmCount || redrawTabs) {
                     updateAlarmTabIconTint();
                 }
             } catch (Exception ignored) {
             }
         }).execute();
+    }
+
+    private void playAlarmSound() {
+        long now = System.currentTimeMillis();
+        if (now - lastAlarmSoundAt < 5000) {
+            return;
+        }
+        lastAlarmSoundAt = now;
+        try {
+            Uri uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM);
+            if (uri == null) {
+                uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION);
+            }
+            if (uri == null) {
+                return;
+            }
+            Ringtone ringtone = RingtoneManager.getRingtone(getApplicationContext(), uri);
+            if (ringtone == null) {
+                return;
+            }
+            if (Build.VERSION.SDK_INT >= 28) {
+                ringtone.setLooping(false);
+            }
+            ringtone.play();
+            Ringtone finalRingtone = ringtone;
+            refreshHandler.postDelayed(() -> {
+                try {
+                    if (finalRingtone.isPlaying()) {
+                        finalRingtone.stop();
+                    }
+                } catch (Exception ignored) {
+                }
+            }, 3000);
+        } catch (Exception ignored) {
+        }
     }
 
     private void ensureAlarmChannel() {
@@ -944,14 +1008,23 @@ public class MainActivity extends Activity {
         }
         long now = System.currentTimeMillis();
         Double candidate = stableCandidatePressureByDevice.get(key);
-        if (candidate == null || Math.abs(pressure - candidate) > 0.05) {
+        if (candidate == null || Math.abs(pressure - candidate) >= STATIC_PRESSURE_DELTA) {
             stableCandidatePressureByDevice.put(key, pressure);
             stableSinceByDevice.put(key, now);
+            staticPressureCapturedByDevice.put(key, false);
             return;
         }
         Long since = stableSinceByDevice.get(key);
         if (since != null && now - since >= STATIC_PRESSURE_STABLE_MS) {
-            staticPressureByDevice.put(key, pressure);
+            boolean captured = Boolean.TRUE.equals(staticPressureCapturedByDevice.get(key));
+            if (!captured) {
+                staticPressureByDevice.put(key, pressure);
+                staticPressureCapturedByDevice.put(key, true);
+                TextView standardView = visibleStandardViews.get(key);
+                if (standardView != null) {
+                    standardView.setText("静止压力：" + trimNumber(pressure));
+                }
+            }
         }
     }
 
@@ -971,28 +1044,33 @@ public class MainActivity extends Activity {
     private View cardFor(JSONObject item) {
         LinearLayout card = new LinearLayout(this);
         card.setOrientation(LinearLayout.VERTICAL);
-        card.setPadding(dp(14), dp(14), dp(14), dp(12));
-        card.setBackground(rounded(0xffffffff, 16));
-        card.setElevation(dp(2));
+        card.setPadding(0, 0, 0, dp(14));
+        card.setBackground(roundedStroke(0xffffffff, 16, 0xffe6edf6));
+        card.setElevation(dp(4));
+
+        View strip = new View(this);
+        strip.setBackground(rounded(tabAccent(currentTab), 16));
+        card.addView(strip, fixedTop(ViewGroup.LayoutParams.MATCH_PARENT, dp(5), 0));
 
         LinearLayout heading = new LinearLayout(this);
         heading.setOrientation(LinearLayout.HORIZONTAL);
         heading.setGravity(Gravity.CENTER_VERTICAL);
+        heading.setPadding(dp(14), dp(13), dp(14), dp(4));
 
         TextView icon = new TextView(this);
         icon.setGravity(Gravity.CENTER);
         icon.setText(iconLetter());
         icon.setTextSize(14);
         icon.setTypeface(null, 1);
-        icon.setTextColor(BLUE);
-        icon.setBackground(rounded(0xffeaf3ff, 11));
-        LinearLayout.LayoutParams iconParams = new LinearLayout.LayoutParams(dp(34), dp(34));
+        icon.setTextColor(0xffffffff);
+        icon.setBackground(rounded(tabAccent(currentTab), 11));
+        LinearLayout.LayoutParams iconParams = new LinearLayout.LayoutParams(dp(36), dp(36));
         iconParams.rightMargin = dp(10);
         heading.addView(icon, iconParams);
 
         TextView title = new TextView(this);
         title.setText(primaryTitle(item));
-        title.setTextSize(17);
+        title.setTextSize(16);
         title.setTextColor(INK);
         title.setTypeface(null, 1);
         heading.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
@@ -1010,9 +1088,9 @@ public class MainActivity extends Activity {
         if (hasAny(item, "pressure", "standard", "battery")) {
             LinearLayout metrics = new LinearLayout(this);
             metrics.setOrientation(LinearLayout.HORIZONTAL);
-            metrics.setPadding(0, dp(12), 0, dp(4));
+            metrics.setPadding(dp(14), dp(10), dp(6), dp(4));
             addMetric(metrics, "实时压力", item.optString("pressure"), 0xffeafaf1, 0xff118a44);
-            addMetric(metrics, "标准压力", item.optString("standard"), 0xffeef4ff, BLUE);
+            addMetric(metrics, "标准压力", item.optString("standard"), 0xffedf7ff, BLUE);
             addMetric(metrics, "电池", item.optString("battery"), 0xfffff7e6, 0xffb45309);
             if (metrics.getChildCount() > 0) {
                 card.addView(metrics);
@@ -1040,22 +1118,22 @@ public class MainActivity extends Activity {
                     if ((currentTab == 0 || currentTab == 2) && "status".equals(key)) {
                         value = onlineStatusText(value);
                     }
-                    card.addView(meta(labelFor(key) + "：" + value));
+                    card.addView(meta(labelFor(key) + "：" + value), sideMargin(dp(14), dp(14), 0));
                 }
             }
         }
 
         JSONObject dept = item.optJSONObject("dept");
         if (dept != null) {
-            card.addView(meta("组织：" + dept.optString("deptName")));
+            card.addView(meta("组织：" + dept.optString("deptName")), sideMargin(dp(14), dp(14), 0));
         }
         JSONObject gateway = item.optJSONObject("gateway");
         if (gateway != null) {
-            card.addView(meta("网关：" + gateway.optString("number") + " " + gateway.optString("name")));
+            card.addView(meta("网关：" + gateway.optString("number") + " " + gateway.optString("name")), sideMargin(dp(14), dp(14), 0));
         }
         JSONObject mould = item.optJSONObject("mould");
         if (mould != null) {
-            card.addView(meta("模具：" + mould.optString("number") + " " + mould.optString("name")));
+            card.addView(meta("模具：" + mould.optString("number") + " " + mould.optString("name")), sideMargin(dp(14), dp(14), 0));
         }
 
         if (currentTab == 3) {
@@ -1064,16 +1142,16 @@ public class MainActivity extends Activity {
 
         LinearLayout actions = new LinearLayout(this);
         actions.setOrientation(LinearLayout.HORIZONTAL);
-        actions.setPadding(0, dp(12), 0, 0);
+        actions.setPadding(dp(14), dp(12), dp(14), 0);
         Button detail = smallButton("详情");
-        styleButton(detail, 0xfff8fafc, 0xff334155, LINE);
+        styleButton(detail, 0xfff8fafc, 0xff334155, 0xffdbe3ef);
         setIcon(detail, R.drawable.ic_info);
         detail.setOnClickListener(v -> showDetail(item));
-        actions.addView(detail, new LinearLayout.LayoutParams(0, dp(38), 1));
+        actions.addView(detail, new LinearLayout.LayoutParams(0, dp(40), 1));
 
         if (currentTab != 1) {
             Button edit = smallButton(currentTab == 3 ? "上下限" : "修改");
-            styleButton(edit, 0xfff0fdf4, 0xff15803d, 0xffbbf7d0);
+            styleButton(edit, 0xffecfdf5, 0xff047857, 0xffa7f3d0);
             setIcon(edit, currentTab == 3 ? R.drawable.ic_pressure : R.drawable.ic_edit);
             edit.setOnClickListener(v -> {
                 if (currentTab == 3) {
@@ -1082,7 +1160,7 @@ public class MainActivity extends Activity {
                     loadDetailForEdit(item);
                 }
             });
-            LinearLayout.LayoutParams editParams = new LinearLayout.LayoutParams(0, dp(38), 1);
+            LinearLayout.LayoutParams editParams = new LinearLayout.LayoutParams(0, dp(40), 1);
             editParams.leftMargin = dp(8);
             actions.addView(edit, editParams);
         }
@@ -1101,11 +1179,13 @@ public class MainActivity extends Activity {
 
         Button toggle = smallButton("展开模具详情");
         toggle.setText(expanded ? "收起模具详情" : "展开模具详情");
-        styleButton(toggle, 0xfff8fafc, 0xff334155, LINE);
+        styleButton(toggle, 0xfff8fafc, 0xff334155, 0xffdbe3ef);
         setIcon(toggle, R.drawable.ic_info);
         LinearLayout.LayoutParams toggleParams = fixedTop(ViewGroup.LayoutParams.MATCH_PARENT, dp(38), dp(10));
+        toggleParams.leftMargin = dp(14);
+        toggleParams.rightMargin = dp(14);
         card.addView(toggle, toggleParams);
-        card.addView(panel, topMargin(dp(8)));
+        card.addView(panel, sideMargin(dp(14), dp(14), dp(8)));
 
         final boolean[] loaded = {expanded};
         if (expanded) {
@@ -1189,7 +1269,7 @@ public class MainActivity extends Activity {
                 row.addView(metrics);
             }
 
-            TextView standardView = meta("标准压力：" + staticPressureText(device));
+            TextView standardView = meta("静止压力：" + staticPressureText(device));
             TextView updateView = meta("更新时间：" + clean(device.optString("updateTime")));
             row.addView(standardView);
             row.addView(updateView);
@@ -1255,7 +1335,7 @@ public class MainActivity extends Activity {
         EditText lower = input("报警下限", false);
         EditText upper = input("报警上限", false);
         TextView pressure = meta("实时压力：-");
-        TextView standard = meta("标准压力：-");
+        TextView standard = meta("静止压力：-");
 
         form.addView(label("传感器"));
         form.addView(sensorSpinner, fixedTop(ViewGroup.LayoutParams.MATCH_PARENT, dp(44), dp(2)));
@@ -1274,13 +1354,13 @@ public class MainActivity extends Activity {
                     lower.setText("");
                     upper.setText("");
                     pressure.setText("实时压力：-");
-                    standard.setText("标准压力：-");
+                    standard.setText("静止压力：-");
                     return;
                 }
                 lower.setText(cleanInput(device.optString("lower")));
                 upper.setText(cleanInput(device.optString("upper")));
                 pressure.setText("实时压力：" + clean(device.optString("pressure")));
-                standard.setText("标准压力：" + staticPressureText(device));
+                standard.setText("静止压力：" + staticPressureText(device));
             }
 
             @Override
@@ -1395,7 +1475,7 @@ public class MainActivity extends Activity {
                     }
                     TextView standardView = visibleStandardViews.get(key);
                     if (standardView != null) {
-                        standardView.setText("标准压力：" + staticPressureText(device));
+                        standardView.setText("静止压力：" + staticPressureText(device));
                     }
                     TextView updateView = visibleUpdateViews.get(key);
                     if (updateView != null) {
@@ -1418,7 +1498,7 @@ public class MainActivity extends Activity {
         if (details == null || details.length() == 0) {
             String detailText = alarm.optString("detail");
             if (detailText.length() > 0 && !"null".equals(detailText)) {
-                card.addView(meta("报警详情：" + detailText));
+                card.addView(meta("报警详情：" + detailText), sideMargin(dp(14), dp(14), 0));
             }
             return;
         }
@@ -1450,7 +1530,7 @@ public class MainActivity extends Activity {
             }
             row.addView(meta("告警时间：" + clean(firstValue(sensor, "create_time", "createTime"))));
 
-            LinearLayout.LayoutParams params = topMargin(dp(10));
+            LinearLayout.LayoutParams params = sideMargin(dp(14), dp(14), dp(10));
             card.addView(row, params);
         }
     }
@@ -1881,9 +1961,9 @@ public class MainActivity extends Activity {
     private TextView meta(String text) {
         TextView view = new TextView(this);
         view.setText(text);
-        view.setTextSize(14);
-        view.setTextColor(0xff475569);
-        view.setPadding(0, dp(5), 0, 0);
+        view.setTextSize(13);
+        view.setTextColor(0xff526174);
+        view.setPadding(0, dp(4), 0, 0);
         return view;
     }
 
@@ -1893,19 +1973,19 @@ public class MainActivity extends Activity {
         }
         LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
-        box.setPadding(dp(10), dp(8), dp(10), dp(8));
-        box.setBackground(rounded(bgColor, 12));
+        box.setPadding(dp(10), dp(9), dp(10), dp(9));
+        box.setBackground(roundedStroke(bgColor, 12, 0x11000000));
 
         TextView valueView = new TextView(this);
         valueView.setText(value);
         valueView.setTextColor(textColor);
-        valueView.setTextSize(18);
+        valueView.setTextSize(17);
         valueView.setTypeface(null, 1);
         box.addView(valueView);
 
         TextView labelView = new TextView(this);
         labelView.setText(label);
-        labelView.setTextColor(0xff64748b);
+        labelView.setTextColor(0xff718096);
         labelView.setTextSize(12);
         box.addView(labelView, topMargin(dp(2)));
 
@@ -2081,6 +2161,20 @@ public class MainActivity extends Activity {
         return "模";
     }
 
+    private String tabSubtitle() {
+        if (currentTab == 0) return "按 MAC 查询或监控关键传感器的实时压力";
+        if (currentTab == 1) return "今日告警、压力详情和消除状态";
+        if (currentTab == 2) return "网关在线状态、绑定模具和设备概览";
+        return offlineMouldMode ? "查看有压力但波动不足的离线模具" : "仅显示压力动态波动的在线生产模具";
+    }
+
+    private int tabAccent(int tab) {
+        if (tab == 0) return BLUE;
+        if (tab == 1) return RED;
+        if (tab == 2) return CYAN;
+        return GREEN;
+    }
+
     private TextView label(String text) {
         TextView view = new TextView(this);
         view.setText(text);
@@ -2167,13 +2261,20 @@ public class MainActivity extends Activity {
         LinearLayout panel = new LinearLayout(this);
         panel.setOrientation(LinearLayout.VERTICAL);
         panel.setGravity(Gravity.CENTER);
-        panel.setPadding(dp(18), dp(18), dp(18), dp(18));
-        panel.setBackground(rounded(0xffffffff, 16));
-        panel.setElevation(dp(2));
+        panel.setPadding(dp(18), dp(20), dp(18), dp(20));
+        panel.setBackground(roundedStroke(0xffffffff, 18, 0xffe6edf6));
+        panel.setElevation(dp(4));
+
+        TextView icon = new TextView(this);
+        icon.setText("·");
+        icon.setGravity(Gravity.CENTER);
+        icon.setTextSize(40);
+        icon.setTextColor(tabAccent(currentTab));
+        panel.addView(icon, fixedTop(dp(46), dp(30), 0));
 
         TextView empty = new TextView(this);
-        empty.setText("暂无内容");
-        empty.setTextSize(18);
+        empty.setText("暂无数据");
+        empty.setTextSize(17);
         empty.setTypeface(null, 1);
         empty.setTextColor(INK);
         empty.setGravity(Gravity.CENTER);
@@ -2205,7 +2306,7 @@ public class MainActivity extends Activity {
         button.setTextColor(0xffffffff);
         button.setTypeface(null, 1);
         button.setAllCaps(false);
-        button.setBackground(rounded(BLUE, 14));
+        button.setBackground(gradient(BLUE, CYAN, 14));
         return button;
     }
 
@@ -2214,13 +2315,16 @@ public class MainActivity extends Activity {
         button.setText(text);
         button.setAllCaps(false);
         button.setTextSize(14);
-        button.setPadding(dp(8), 0, dp(8), 0);
+        button.setTypeface(null, 1);
+        button.setPadding(dp(9), 0, dp(9), 0);
+        button.setMinHeight(0);
+        button.setMinWidth(0);
         return button;
     }
 
     private void styleButton(Button button, int bgColor, int textColor, int strokeColor) {
         button.setTextColor(textColor);
-        button.setBackground(roundedStroke(bgColor, 12, strokeColor));
+        button.setBackground(roundedStroke(bgColor, 14, strokeColor));
     }
 
     private void setIcon(Button button, int resId) {
@@ -2259,6 +2363,15 @@ public class MainActivity extends Activity {
         return drawable;
     }
 
+    private GradientDrawable gradient(int startColor, int endColor, int radiusDp) {
+        GradientDrawable drawable = new GradientDrawable(
+                GradientDrawable.Orientation.LEFT_RIGHT,
+                new int[]{startColor, endColor}
+        );
+        drawable.setCornerRadius(dp(radiusDp));
+        return drawable;
+    }
+
     private GradientDrawable roundedStroke(int color, int radiusDp, int strokeColor) {
         GradientDrawable drawable = rounded(color, radiusDp);
         drawable.setStroke(dp(1), strokeColor);
@@ -2282,6 +2395,14 @@ public class MainActivity extends Activity {
 
     private LinearLayout.LayoutParams topMargin(int top) {
         LinearLayout.LayoutParams params = matchWrap();
+        params.topMargin = top;
+        return params;
+    }
+
+    private LinearLayout.LayoutParams sideMargin(int left, int right, int top) {
+        LinearLayout.LayoutParams params = matchWrap();
+        params.leftMargin = left;
+        params.rightMargin = right;
         params.topMargin = top;
         return params;
     }
