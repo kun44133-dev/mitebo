@@ -60,6 +60,8 @@ import java.util.Map;
 public class MainActivity extends Activity {
     private static final String BASE_URL = "http://iot.mitebo.cn/prod-api";
     private static final String PREFS = "mitebo_iot";
+    private static final String PREF_ALARM_SOUND_URI = "alarm_sound_uri";
+    private static final int REQ_ALARM_SOUND = 310;
     private static final int BLUE = 0xff1677ff;
     private static final int NAVY = 0xff10233f;
     private static final int CYAN = 0xff00a6d6;
@@ -72,12 +74,15 @@ public class MainActivity extends Activity {
     private static final int PAGE_BG = 0xfff3f6fb;
     private static final String ALARM_CHANNEL_ID = "alarm_badge";
     private static final int ALARM_NOTIFICATION_ID = 1024;
-    private static final long STATIC_PRESSURE_STABLE_MS = 5000;
+    private static final long STATIC_PRESSURE_STABLE_MS = 20000;
     private static final long DEFAULT_REFRESH_MS = 15000;
+    private static final long ALARM_REFRESH_MS = 5000;
     private static final long MOULD_REFRESH_MS = 5000;
     private static final long MOULD_ACTIVE_WINDOW_MS = 5000;
     private static final double MOULD_ONLINE_PRESSURE_DELTA = 10.0;
     private static final double STATIC_PRESSURE_DELTA = 10.0;
+    private static final double STATIC_PRESSURE_STABLE_DELTA = 2.0;
+    private static final double STATIC_PRESSURE_OVERWRITE_DELTA = 2.0;
 
     private FrameLayout root;
     private ProgressBar loading;
@@ -97,6 +102,8 @@ public class MainActivity extends Activity {
     private String lastSeenAlarmKey = "";
     private boolean offlineMouldMode = false;
     private long lastAlarmSoundAt = 0;
+    private Ringtone activeAlarmRingtone;
+    private boolean alarmSoundLooping = false;
     private final List<String> expandedMouldIds = new ArrayList<>();
     private final Map<String, Double> lastPressureByDevice = new HashMap<>();
     private final Map<String, Double> stableCandidatePressureByDevice = new HashMap<>();
@@ -112,13 +119,21 @@ public class MainActivity extends Activity {
         @Override
         public void run() {
             if (token != null && content != null) {
-                fetchAlarmCount(true);
                 if (currentTab == 3) {
                     refreshVisibleMouldPressureValues();
                 } else {
                     loadList(false);
                 }
                 refreshHandler.postDelayed(this, currentTab == 3 ? MOULD_REFRESH_MS : DEFAULT_REFRESH_MS);
+            }
+        }
+    };
+    private final Runnable alarmRefresh = new Runnable() {
+        @Override
+        public void run() {
+            if (token != null) {
+                fetchAlarmCount(false);
+                refreshHandler.postDelayed(this, ALARM_REFRESH_MS);
             }
         }
     };
@@ -175,13 +190,30 @@ public class MainActivity extends Activity {
     }
 
     @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode != REQ_ALARM_SOUND || resultCode != RESULT_OK || data == null) {
+            return;
+        }
+        Uri picked = data.getParcelableExtra(RingtoneManager.EXTRA_RINGTONE_PICKED_URI);
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                .putString(PREF_ALARM_SOUND_URI, picked == null ? "" : picked.toString())
+                .apply();
+        toast(picked == null ? "已关闭报警提示音" : "报警提示音已设置");
+        playAlarmSound(true);
+    }
+
+    @Override
     protected void onDestroy() {
         refreshHandler.removeCallbacks(pressureRefresh);
+        refreshHandler.removeCallbacks(alarmRefresh);
+        stopAlarmSoundLoop();
         super.onDestroy();
     }
 
     private void showLogin() {
         refreshHandler.removeCallbacks(pressureRefresh);
+        refreshHandler.removeCallbacks(alarmRefresh);
         root.removeAllViews();
         ScrollView scroll = new ScrollView(this);
         scroll.setBackgroundColor(PAGE_BG);
@@ -350,6 +382,7 @@ public class MainActivity extends Activity {
 
     private void showHome() {
         refreshHandler.removeCallbacks(pressureRefresh);
+        refreshHandler.removeCallbacks(alarmRefresh);
         root.removeAllViews();
         LinearLayout page = new LinearLayout(this);
         page.setOrientation(LinearLayout.VERTICAL);
@@ -415,11 +448,6 @@ public class MainActivity extends Activity {
                 if (currentTab != 3) {
                     offlineMouldMode = false;
                 }
-                if (currentTab == 1) {
-                    unreadAlarmCount = 0;
-                    updateLauncherAlarmBadge();
-                    updateAlarmTabIconTint();
-                }
                 expandedMouldIds.clear();
                 showHome();
             });
@@ -451,6 +479,15 @@ public class MainActivity extends Activity {
             LinearLayout.LayoutParams searchParams = new LinearLayout.LayoutParams(0, dp(44), 1);
             searchParams.leftMargin = dp(8);
             actions.addView(search, searchParams);
+        }
+        if (currentTab == 1) {
+            Button sound = smallButton("声音设置");
+            styleButton(sound, 0xfffff1f2, RED, 0xffffc7d0);
+            setIcon(sound, R.drawable.ic_alarm);
+            sound.setOnClickListener(v -> showAlarmSoundPicker());
+            LinearLayout.LayoutParams soundParams = new LinearLayout.LayoutParams(0, dp(44), 1);
+            soundParams.leftMargin = dp(8);
+            actions.addView(sound, soundParams);
         }
         if (currentTab != 1) {
             String actionText = currentTab == 0 ? "添加监控" : currentTab == 3 ? (offlineMouldMode ? "在线模具" : "离线模具") : "新增" + tabTitles[currentTab];
@@ -490,6 +527,7 @@ public class MainActivity extends Activity {
         fetchAlarmCount(true);
         loadList(true);
         schedulePressureRefresh();
+        scheduleAlarmRefresh();
     }
 
     private void loadList() {
@@ -532,22 +570,14 @@ public class MainActivity extends Activity {
                 JSONArray rows = json.optJSONArray("rows");
                 if (rows == null || rows.length() == 0) {
                     if (currentTab == 1) {
-                        unreadAlarmCount = 0;
-                        lastAlarmTotal = 0;
-                        lastSeenAlarmKey = "";
-                        updateLauncherAlarmBadge();
+                        syncActiveAlarmState(null, false, true);
                     }
                     showEmpty("暂无数据");
                     return;
                 }
                 if (currentTab == 1) {
-                    unreadAlarmCount = 0;
                     lastAlarmTotal = json.optInt("total", rows.length());
-                    JSONObject latest = rows.optJSONObject(0);
-                    if (latest != null) {
-                        lastSeenAlarmKey = alarmKey(latest);
-                    }
-                    updateLauncherAlarmBadge();
+                    syncActiveAlarmState(rows, false, true);
                 }
                 if (currentTab == 3) {
                     renderPressureMoulds(rows);
@@ -572,54 +602,69 @@ public class MainActivity extends Activity {
         if (token == null) {
             return;
         }
-        new ApiTask("GET", "/yujing/alarm/list?pageNum=1&pageSize=10", null, true, result -> {
+        new ApiTask("GET", "/yujing/alarm/list?pageNum=1&pageSize=50", null, true, result -> {
             if (!result.ok) {
                 return;
             }
             try {
                 JSONObject json = new JSONObject(result.body);
                 JSONArray rows = json.optJSONArray("rows");
-                int oldUnread = unreadAlarmCount;
-                String latestKey = rows == null || rows.length() == 0 ? "" : alarmKey(rows.optJSONObject(0));
-                if (latestKey.length() == 0) {
-                    lastSeenAlarmKey = "";
-                    lastAlarmTotal = 0;
-                    unreadAlarmCount = 0;
-                } else if (currentTab == 1) {
-                    unreadAlarmCount = 0;
-                    lastSeenAlarmKey = latestKey;
-                } else {
-                    if (lastSeenAlarmKey.length() == 0) {
-                        lastSeenAlarmKey = latestKey;
-                    } else if (!latestKey.equals(lastSeenAlarmKey)) {
-                        unreadAlarmCount += countNewAlarms(rows, lastSeenAlarmKey);
-                        lastSeenAlarmKey = latestKey;
-                    }
-                }
                 lastAlarmTotal = json.optInt("total", rows == null ? 0 : rows.length());
-                updateLauncherAlarmBadge();
-                if (unreadAlarmCount > oldUnread) {
-                    playAlarmSound();
-                }
-                if (oldUnread != unreadAlarmCount || redrawTabs) {
-                    updateAlarmTabIconTint();
-                }
+                syncActiveAlarmState(rows, true, redrawTabs);
             } catch (Exception ignored) {
             }
         }).execute();
     }
 
-    private void playAlarmSound() {
+    private void syncActiveAlarmState(JSONArray rows, boolean allowSound, boolean redrawTabs) {
+        int oldCount = unreadAlarmCount;
+        int activeCount = 0;
+        String latestActiveKey = "";
+        if (rows != null) {
+            for (int i = 0; i < rows.length(); i++) {
+                JSONObject alarm = rows.optJSONObject(i);
+                if (alarm == null || !isActiveAlarm(alarm)) {
+                    continue;
+                }
+                activeCount++;
+                if (latestActiveKey.length() == 0) {
+                    latestActiveKey = alarmKey(alarm);
+                }
+            }
+        }
+        boolean newActiveAlarm = activeCount > oldCount
+                || (activeCount >= oldCount && oldCount > 0 && latestActiveKey.length() > 0 && !latestActiveKey.equals(lastSeenAlarmKey));
+        unreadAlarmCount = activeCount;
+        lastSeenAlarmKey = latestActiveKey;
+        updateLauncherAlarmBadge();
+        if (activeCount > 0) {
+            if (allowSound && newActiveAlarm) {
+                startAlarmSoundLoop();
+            }
+        } else {
+            stopAlarmSoundLoop();
+        }
+        if (oldCount != unreadAlarmCount || redrawTabs) {
+            updateAlarmTabIconTint();
+        }
+    }
+
+    private boolean isActiveAlarm(JSONObject alarm) {
+        String state = firstValue(alarm, "state", "status", "type");
+        if (state.length() == 0) {
+            return true;
+        }
+        return !isAlarmCleared(state);
+    }
+
+    private void playAlarmSound(boolean force) {
         long now = System.currentTimeMillis();
-        if (now - lastAlarmSoundAt < 5000) {
+        if (!force && now - lastAlarmSoundAt < 5000) {
             return;
         }
         lastAlarmSoundAt = now;
         try {
-            Uri uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM);
-            if (uri == null) {
-                uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION);
-            }
+            Uri uri = selectedAlarmSoundUri();
             if (uri == null) {
                 return;
             }
@@ -641,6 +686,93 @@ public class MainActivity extends Activity {
                 }
             }, 3000);
         } catch (Exception ignored) {
+        }
+    }
+
+    private void startAlarmSoundLoop() {
+        if (alarmSoundLooping) {
+            return;
+        }
+        try {
+            Uri uri = selectedAlarmSoundUri();
+            if (uri == null) {
+                return;
+            }
+            activeAlarmRingtone = RingtoneManager.getRingtone(getApplicationContext(), uri);
+            if (activeAlarmRingtone == null) {
+                return;
+            }
+            alarmSoundLooping = true;
+            if (Build.VERSION.SDK_INT >= 28) {
+                activeAlarmRingtone.setLooping(true);
+            }
+            activeAlarmRingtone.play();
+            if (Build.VERSION.SDK_INT < 28) {
+                refreshHandler.postDelayed(alarmSoundRepeater, 3000);
+            }
+        } catch (Exception ignored) {
+            alarmSoundLooping = false;
+        }
+    }
+
+    private final Runnable alarmSoundRepeater = new Runnable() {
+        @Override
+        public void run() {
+            if (!alarmSoundLooping || unreadAlarmCount <= 0) {
+                stopAlarmSoundLoop();
+                return;
+            }
+            try {
+                if (activeAlarmRingtone != null && !activeAlarmRingtone.isPlaying()) {
+                    activeAlarmRingtone.play();
+                }
+            } catch (Exception ignored) {
+            }
+            refreshHandler.postDelayed(this, 3000);
+        }
+    };
+
+    private void stopAlarmSoundLoop() {
+        refreshHandler.removeCallbacks(alarmSoundRepeater);
+        alarmSoundLooping = false;
+        if (activeAlarmRingtone != null) {
+            try {
+                if (activeAlarmRingtone.isPlaying()) {
+                    activeAlarmRingtone.stop();
+                }
+            } catch (Exception ignored) {
+            }
+            activeAlarmRingtone = null;
+        }
+    }
+
+    private Uri selectedAlarmSoundUri() {
+        String saved = getSharedPreferences(PREFS, MODE_PRIVATE).getString(PREF_ALARM_SOUND_URI, null);
+        if (saved != null) {
+            if (saved.length() == 0) {
+                return null;
+            }
+            return Uri.parse(saved);
+        }
+        Uri uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM);
+        if (uri == null) {
+            uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION);
+        }
+        return uri;
+    }
+
+    private void showAlarmSoundPicker() {
+        Intent intent = new Intent(RingtoneManager.ACTION_RINGTONE_PICKER);
+        intent.putExtra(RingtoneManager.EXTRA_RINGTONE_TYPE, RingtoneManager.TYPE_ALARM | RingtoneManager.TYPE_NOTIFICATION);
+        intent.putExtra(RingtoneManager.EXTRA_RINGTONE_TITLE, "选择报警提示音");
+        intent.putExtra(RingtoneManager.EXTRA_RINGTONE_SHOW_SILENT, true);
+        intent.putExtra(RingtoneManager.EXTRA_RINGTONE_SHOW_DEFAULT, true);
+        Uri current = selectedAlarmSoundUri();
+        intent.putExtra(RingtoneManager.EXTRA_RINGTONE_EXISTING_URI, current);
+        try {
+            startActivityForResult(intent, REQ_ALARM_SOUND);
+        } catch (Exception e) {
+            toast("当前设备不支持系统铃声选择");
         }
     }
 
@@ -833,6 +965,11 @@ public class MainActivity extends Activity {
         refreshHandler.postDelayed(pressureRefresh, currentTab == 3 ? MOULD_REFRESH_MS : DEFAULT_REFRESH_MS);
     }
 
+    private void scheduleAlarmRefresh() {
+        refreshHandler.removeCallbacks(alarmRefresh);
+        refreshHandler.postDelayed(alarmRefresh, ALARM_REFRESH_MS);
+    }
+
     private void showMacSearchDialog() {
         LinearLayout form = new LinearLayout(this);
         form.setOrientation(LinearLayout.VERTICAL);
@@ -1008,17 +1145,25 @@ public class MainActivity extends Activity {
         }
         long now = System.currentTimeMillis();
         Double candidate = stableCandidatePressureByDevice.get(key);
-        if (candidate == null || Math.abs(pressure - candidate) >= STATIC_PRESSURE_DELTA) {
+        if (candidate == null || Math.abs(pressure - candidate) >= STATIC_PRESSURE_STABLE_DELTA) {
             stableCandidatePressureByDevice.put(key, pressure);
             stableSinceByDevice.put(key, now);
-            staticPressureCapturedByDevice.put(key, false);
+            if (candidate == null || Math.abs(pressure - candidate) >= STATIC_PRESSURE_DELTA) {
+                staticPressureCapturedByDevice.put(key, false);
+            }
             return;
         }
         Long since = stableSinceByDevice.get(key);
         if (since != null && now - since >= STATIC_PRESSURE_STABLE_MS) {
             boolean captured = Boolean.TRUE.equals(staticPressureCapturedByDevice.get(key));
             if (!captured) {
+                Double existing = existingStaticPressure(device);
+                if (existing != null && pressure > existing + STATIC_PRESSURE_OVERWRITE_DELTA) {
+                    staticPressureCapturedByDevice.put(key, true);
+                    return;
+                }
                 staticPressureByDevice.put(key, pressure);
+                saveStaticPressure(key, pressure);
                 staticPressureCapturedByDevice.put(key, true);
                 TextView standardView = visibleStandardViews.get(key);
                 if (standardView != null) {
@@ -1030,11 +1175,42 @@ public class MainActivity extends Activity {
 
     private String staticPressureText(JSONObject device) {
         String key = deviceKey(device);
-        Double value = key.length() == 0 ? null : staticPressureByDevice.get(key);
+        Double value = existingStaticPressure(device);
         if (value != null) {
             return trimNumber(value);
         }
         return clean(device.optString("standard"));
+    }
+
+    private Double existingStaticPressure(JSONObject device) {
+        String key = deviceKey(device);
+        Double value = key.length() == 0 ? null : staticPressureByDevice.get(key);
+        if (value != null) {
+            return value;
+        }
+        value = key.length() == 0 ? null : storedStaticPressure(key);
+        if (value != null) {
+            staticPressureByDevice.put(key, value);
+            return value;
+        }
+        return numberValue(device.optString("standard"));
+    }
+
+    private void saveStaticPressure(String key, Double pressure) {
+        if (key == null || key.length() == 0 || pressure == null) {
+            return;
+        }
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                .putString("static_pressure_" + key, trimNumber(pressure))
+                .apply();
+    }
+
+    private Double storedStaticPressure(String key) {
+        if (key == null || key.length() == 0) {
+            return null;
+        }
+        String saved = getSharedPreferences(PREFS, MODE_PRIVATE).getString("static_pressure_" + key, "");
+        return numberValue(saved);
     }
 
     private String deviceKey(JSONObject device) {
@@ -2170,7 +2346,7 @@ public class MainActivity extends Activity {
 
     private int tabAccent(int tab) {
         if (tab == 0) return BLUE;
-        if (tab == 1) return RED;
+        if (tab == 1) return AMBER;
         if (tab == 2) return CYAN;
         return GREEN;
     }
