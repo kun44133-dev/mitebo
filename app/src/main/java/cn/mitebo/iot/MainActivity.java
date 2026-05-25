@@ -67,6 +67,7 @@ public class MainActivity extends Activity {
     private static final String PREFS = "mitebo_iot";
     private static final String PREF_ALARM_SOUND_URI = "alarm_sound_uri";
     private static final String PREF_ALARM_SOUND_ENABLED = "alarm_sound_enabled";
+    private static final String PREF_BACKGROUND_ALARM_MONITOR = "background_alarm_monitor";
     private static final int REQ_ALARM_SOUND = 310;
     private static final int BLUE = 0xff1f6feb;
     private static final int NAVY = 0xff071827;
@@ -100,7 +101,6 @@ public class MainActivity extends Activity {
     private ImageView captchaView;
     private EditText usernameInput;
     private EditText passwordInput;
-    private Spinner savedAccountSpinner;
     private EditText captchaInput;
     private CheckBox rememberPasswordCheck;
     private LinearLayout content;
@@ -111,6 +111,7 @@ public class MainActivity extends Activity {
     private int lastAlarmTotal = -1;
     private String lastSeenAlarmKey = "";
     private String alarmDateFilter = "";
+    private boolean alarmDateManuallySelected = false;
     private boolean offlineMouldMode = false;
     private float mouldPullStartY = -1f;
     private boolean mouldPullReady = false;
@@ -221,6 +222,20 @@ public class MainActivity extends Activity {
     }
 
     @Override
+    protected void onResume() {
+        super.onResume();
+        stopAlarmMonitorService();
+    }
+
+    @Override
+    protected void onStop() {
+        if (token != null && token.length() > 0 && backgroundAlarmMonitorEnabled()) {
+            startAlarmMonitorService();
+        }
+        super.onStop();
+    }
+
+    @Override
     protected void onDestroy() {
         refreshHandler.removeCallbacks(pressureRefresh);
         refreshHandler.removeCallbacks(alarmRefresh);
@@ -299,39 +314,29 @@ public class MainActivity extends Activity {
         panelSub.setTextColor(MUTED);
         panel.addView(panelSub, topMargin(dp(4)));
 
-        List<OptionItem> savedAccounts = savedAccountOptions();
-        if (savedAccounts.size() > 1) {
-            panel.addView(label("已保存账号"));
-            savedAccountSpinner = spinner(savedAccounts, latestSavedUsername());
-            savedAccountSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
-                @Override
-                public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
-                    if (usernameInput == null || passwordInput == null || rememberPasswordCheck == null) {
-                        return;
-                    }
-                    Object selected = savedAccountSpinner.getSelectedItem();
-                    if (!(selected instanceof OptionItem)) {
-                        return;
-                    }
-                    String username = ((OptionItem) selected).value;
-                    if (username.length() == 0) {
-                        return;
-                    }
-                    usernameInput.setText(username);
-                    passwordInput.setText(savedPasswordFor(username));
-                    rememberPasswordCheck.setChecked(true);
-                }
-
-                @Override
-                public void onNothingSelected(AdapterView<?> parent) {
-                }
-            });
-            panel.addView(savedAccountSpinner, fixedTop(ViewGroup.LayoutParams.MATCH_PARENT, dp(44), dp(2)));
-        }
-
+        LinearLayout accountRow = new LinearLayout(this);
+        accountRow.setOrientation(LinearLayout.HORIZONTAL);
+        accountRow.setGravity(Gravity.CENTER_VERTICAL);
+        accountRow.setPadding(0, 0, dp(4), 0);
+        accountRow.setBackground(roundedStroke(0xfffbfdff, 14, LINE));
         usernameInput = input("账号", false);
+        usernameInput.setBackground(rounded(0x00ffffff, 0));
         usernameInput.setText(latestSavedUsername());
-        panel.addView(usernameInput, fixedTop(ViewGroup.LayoutParams.MATCH_PARENT, dp(50), dp(18)));
+        accountRow.addView(usernameInput, new LinearLayout.LayoutParams(0, dp(50), 1));
+        View divider = new View(this);
+        divider.setBackgroundColor(0xffdbe3ef);
+        accountRow.addView(divider, new LinearLayout.LayoutParams(dp(1), dp(26)));
+        TextView accountPicker = new TextView(this);
+        accountPicker.setText("▾");
+        accountPicker.setTextSize(18);
+        accountPicker.setTypeface(null, 1);
+        accountPicker.setTextColor(0xff64748b);
+        accountPicker.setGravity(Gravity.CENTER);
+        accountPicker.setBackground(rounded(0x00ffffff, 0));
+        accountPicker.setOnClickListener(v -> showSavedAccountChooser());
+        LinearLayout.LayoutParams pickerParams = new LinearLayout.LayoutParams(dp(44), dp(50));
+        accountRow.addView(accountPicker, pickerParams);
+        panel.addView(accountRow, fixedTop(ViewGroup.LayoutParams.MATCH_PARENT, dp(50), dp(18)));
         passwordInput = input("密码", true);
         boolean remembered = getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean("remember_password", false);
         if (remembered) {
@@ -495,6 +500,29 @@ public class MainActivity extends Activity {
         }
     }
 
+    private void showSavedAccountChooser() {
+        List<OptionItem> accounts = savedAccountOptions();
+        if (accounts.size() <= 1) {
+            toast("暂无已保存账号");
+            return;
+        }
+        String[] labels = new String[accounts.size() - 1];
+        for (int i = 1; i < accounts.size(); i++) {
+            labels[i - 1] = accounts.get(i).label;
+        }
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle("选择账号")
+                .setItems(labels, (d, which) -> {
+                    OptionItem account = accounts.get(which + 1);
+                    usernameInput.setText(account.value);
+                    passwordInput.setText(savedPasswordFor(account.value));
+                    rememberPasswordCheck.setChecked(true);
+                })
+                .setNegativeButton("取消", null)
+                .create();
+        showStyledDialog(dialog);
+    }
+
     private void loadCaptcha() {
         setLoading(true);
         new ApiTask("GET", "/captchaImage", null, false, result -> {
@@ -573,6 +601,7 @@ public class MainActivity extends Activity {
         applyAdaptiveSystemBars(true);
         refreshHandler.removeCallbacks(pressureRefresh);
         refreshHandler.removeCallbacks(alarmRefresh);
+        normalizeAlarmDateForCurrentTab();
         root.removeAllViews();
         LinearLayout page = new LinearLayout(this);
         page.setOrientation(LinearLayout.VERTICAL);
@@ -601,6 +630,28 @@ public class MainActivity extends Activity {
         loadList(true);
         schedulePressureRefresh();
         scheduleAlarmRefresh();
+    }
+
+    private void startAlarmMonitorService() {
+        if (token == null || token.length() == 0) {
+            return;
+        }
+        Intent intent = new Intent(this, AlarmMonitorService.class);
+        try {
+            if (Build.VERSION.SDK_INT >= 26) {
+                startForegroundService(intent);
+            } else {
+                startService(intent);
+            }
+        } catch (Exception ignored) {
+        }
+    }
+
+    private void stopAlarmMonitorService() {
+        try {
+            stopService(new Intent(this, AlarmMonitorService.class));
+        } catch (Exception ignored) {
+        }
     }
 
     private void attachPullRefresh(ScrollView scroll) {
@@ -901,6 +952,10 @@ public class MainActivity extends Activity {
         return getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean(PREF_ALARM_SOUND_ENABLED, true);
     }
 
+    private boolean backgroundAlarmMonitorEnabled() {
+        return getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean(PREF_BACKGROUND_ALARM_MONITOR, false);
+    }
+
     private void showAlarmSoundPicker() {
         Intent intent = new Intent(RingtoneManager.ACTION_RINGTONE_PICKER);
         intent.putExtra(RingtoneManager.EXTRA_RINGTONE_TYPE, RingtoneManager.TYPE_ALARM | RingtoneManager.TYPE_NOTIFICATION);
@@ -1101,10 +1156,16 @@ public class MainActivity extends Activity {
     }
 
     private String selectedAlarmDate() {
-        if (alarmDateFilter == null || alarmDateFilter.length() == 0) {
+        if (alarmDateFilter == null || alarmDateFilter.length() == 0 || !alarmDateManuallySelected) {
             alarmDateFilter = todayPrefix();
         }
         return alarmDateFilter;
+    }
+
+    private void normalizeAlarmDateForCurrentTab() {
+        if (currentTab == 1 && !alarmDateManuallySelected) {
+            alarmDateFilter = todayPrefix();
+        }
     }
 
     private void schedulePressureRefresh() {
@@ -1321,6 +1382,7 @@ public class MainActivity extends Activity {
                 this,
                 (view, year, month, dayOfMonth) -> {
                     alarmDateFilter = String.format(java.util.Locale.CHINA, "%04d-%02d-%02d", year, month + 1, dayOfMonth);
+                    alarmDateManuallySelected = !alarmDateFilter.equals(todayPrefix());
                     showHome();
                 },
                 calendar.get(Calendar.YEAR),
@@ -1329,6 +1391,7 @@ public class MainActivity extends Activity {
         );
         picker.setButton(DialogInterface.BUTTON_NEUTRAL, "今天", (d, which) -> {
             alarmDateFilter = todayPrefix();
+            alarmDateManuallySelected = false;
             showHome();
         });
         picker.show();
@@ -1357,6 +1420,22 @@ public class MainActivity extends Activity {
             buttonView.setText(isChecked ? "报警声音：开启" : "报警声音：关闭");
         });
         alarmCard.addView(soundSwitch, fixedTop(ViewGroup.LayoutParams.MATCH_PARENT, dp(42), dp(10)));
+        CheckBox backgroundSwitch = new CheckBox(this);
+        backgroundSwitch.setText(backgroundAlarmMonitorEnabled() ? "后台告警监控：开启" : "后台告警监控：关闭");
+        backgroundSwitch.setTextSize(14);
+        backgroundSwitch.setTextColor(INK);
+        backgroundSwitch.setChecked(backgroundAlarmMonitorEnabled());
+        backgroundSwitch.setOnCheckedChangeListener((buttonView, isChecked) -> {
+            getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                    .putBoolean(PREF_BACKGROUND_ALARM_MONITOR, isChecked)
+                    .apply();
+            if (!isChecked) {
+                stopAlarmMonitorService();
+            }
+            buttonView.setText(isChecked ? "后台告警监控：开启" : "后台告警监控：关闭");
+            toast(isChecked ? "退到后台后会继续监控告警" : "已关闭后台轮询，退后台后不再刷新告警");
+        });
+        alarmCard.addView(backgroundSwitch, fixedTop(ViewGroup.LayoutParams.MATCH_PARENT, dp(42), dp(8)));
         TextView pickTone = settingsAction("选择报警提示音");
         pickTone.setOnClickListener(v -> showAlarmSoundPicker());
         alarmCard.addView(pickTone, fixedTop(ViewGroup.LayoutParams.MATCH_PARENT, dp(42), dp(8)));
@@ -1367,6 +1446,7 @@ public class MainActivity extends Activity {
         TextView exit = settingsAction("退出登录");
         exit.setTextColor(RED);
         exit.setOnClickListener(v -> {
+            stopAlarmMonitorService();
             getSharedPreferences(PREFS, MODE_PRIVATE).edit().remove("token").apply();
             token = null;
             showLogin();
@@ -1442,6 +1522,10 @@ public class MainActivity extends Activity {
 
             item.setOnClickListener(v -> {
                 currentTab = index;
+                if (currentTab == 1) {
+                    alarmDateManuallySelected = false;
+                    alarmDateFilter = todayPrefix();
+                }
                 if (currentTab != 2) {
                     offlineMouldMode = false;
                 }
