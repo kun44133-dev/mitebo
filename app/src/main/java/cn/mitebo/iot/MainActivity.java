@@ -113,6 +113,7 @@ public class MainActivity extends Activity {
     private String alarmDateFilter = "";
     private boolean alarmDateManuallySelected = false;
     private boolean offlineMouldMode = false;
+    private boolean appInForeground = false;
     private float mouldPullStartY = -1f;
     private boolean mouldPullReady = false;
     private View openedDeviceSwipeCard;
@@ -136,7 +137,7 @@ public class MainActivity extends Activity {
     private final Runnable pressureRefresh = new Runnable() {
         @Override
         public void run() {
-            if (token != null && content != null) {
+            if (appInForeground && token != null && content != null) {
                 if (currentTab == 2) {
                     refreshVisibleMouldPressureValues();
                 } else {
@@ -149,7 +150,7 @@ public class MainActivity extends Activity {
     private final Runnable alarmRefresh = new Runnable() {
         @Override
         public void run() {
-            if (token != null) {
+            if (appInForeground && token != null) {
                 fetchAlarmCount(false);
                 refreshHandler.postDelayed(this, ALARM_REFRESH_MS);
             }
@@ -224,11 +225,21 @@ public class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        appInForeground = true;
         stopAlarmMonitorService();
+        if (token != null && token.length() > 0 && content != null) {
+            fetchAlarmCount(true);
+            schedulePressureRefresh();
+            scheduleAlarmRefresh();
+        }
     }
 
     @Override
     protected void onStop() {
+        appInForeground = false;
+        refreshHandler.removeCallbacks(pressureRefresh);
+        refreshHandler.removeCallbacks(alarmRefresh);
+        stopAlarmSoundLoop();
         if (token != null && token.length() > 0 && backgroundAlarmMonitorEnabled()) {
             startAlarmMonitorService();
         }
@@ -1650,7 +1661,7 @@ public class MainActivity extends Activity {
         int count = 0;
         for (int i = 0; i < rows.length(); i++) {
             JSONObject item = rows.optJSONObject(i);
-            if (item != null && !isOfflineStatus(item.optString("status"))) {
+            if (item != null && !isSensorOffline(item)) {
                 count++;
             }
         }
@@ -2074,7 +2085,7 @@ public class MainActivity extends Activity {
         smoothElevation(card, 3);
 
         TextView dot = new TextView(this);
-        boolean offline = isOfflineStatus(item.optString("status"));
+        boolean offline = isSensorOffline(item);
         dot.setText("●");
         dot.setTextSize(16);
         dot.setTextColor(offline ? 0xff94a3b8 : GREEN);
@@ -2104,6 +2115,12 @@ public class MainActivity extends Activity {
         sub.setPadding(0, dp(4), 0, 0);
         copy.addView(sub);
         card.addView(copy, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+
+        TextView status = sensorStatusChip(item);
+        LinearLayout.LayoutParams statusParams = new LinearLayout.LayoutParams(dp(48), dp(26));
+        statusParams.leftMargin = dp(6);
+        statusParams.rightMargin = dp(6);
+        card.addView(status, statusParams);
 
         LinearLayout pressureBox = new LinearLayout(this);
         pressureBox.setOrientation(LinearLayout.VERTICAL);
@@ -2610,7 +2627,7 @@ public class MainActivity extends Activity {
                     TextView pressureView = addTableCell(row, clean(device.optString("pressure")), 1, false, BLUE, Gravity.CENTER);
                     TextView standardView = addTableCell(row, staticPressureText(device), 1, false, 0xff334155, Gravity.CENTER);
                     String stateText = sensorPressureState(device);
-                    addTableCell(row, stateText, 1, false, "告警".equals(stateText) ? RED : GREEN, Gravity.CENTER);
+                    addTableCell(row, stateText, 1, false, sensorStateColor(stateText), Gravity.CENTER);
                     table.addView(row, topMargin(dp(6)));
                     String key = deviceKey(device);
                     if (key.length() > 0) {
@@ -2645,13 +2662,26 @@ public class MainActivity extends Activity {
     }
 
     private String sensorPressureState(JSONObject device) {
+        if (isSensorOffline(device)) {
+            return "离线";
+        }
         Double pressure = numberValue(device.optString("pressure"));
         Double lower = numberValue(device.optString("lower"));
         Double upper = numberValue(device.optString("upper"));
         if (pressure != null && ((lower != null && pressure < lower) || (upper != null && pressure > upper))) {
             return "告警";
         }
-        return isOfflineStatus(device.optString("status")) ? "离线" : "在线";
+        return "在线";
+    }
+
+    private int sensorStateColor(String stateText) {
+        if ("告警".equals(stateText)) {
+            return RED;
+        }
+        if ("离线".equals(stateText) || "-".equals(stateText)) {
+            return 0xff94a3b8;
+        }
+        return GREEN;
     }
 
     private void addMouldModeButton() {
@@ -3573,6 +3603,11 @@ public class MainActivity extends Activity {
         if (object.has(key) && !object.isNull(key)) {
             String value = object.optString(key);
             if (value.length() > 0) {
+                if ("status".equals(key) && currentTab == 0) {
+                    value = sensorOnlineStatusText(object);
+                } else if ("status".equals(key) && currentTab == 2) {
+                    value = onlineStatusText(value);
+                }
                 builder.append(labelFor(key)).append("：").append(value).append("\n");
             }
         }
@@ -3708,7 +3743,18 @@ public class MainActivity extends Activity {
                 return badge;
             }
         }
-        if ((currentTab == 0 || currentTab == 2) && status.length() > 0 && !"null".equals(status)) {
+        if (currentTab == 0) {
+            String text = sensorOnlineStatusText(item);
+            boolean offline = isSensorOffline(item);
+            TextView badge = new TextView(this);
+            badge.setText(text);
+            badge.setTextSize(12);
+            badge.setTextColor(offline ? 0xff92400e : 0xff0f766e);
+            badge.setPadding(dp(10), dp(5), dp(10), dp(5));
+            badge.setBackground(roundedStroke(offline ? 0xfffff8e5 : 0xffecfdf5, 12, offline ? 0xfff3d77a : 0xffa7f3d0));
+            return badge;
+        }
+        if (currentTab == 2 && status.length() > 0 && !"null".equals(status)) {
             String text = onlineStatusText(status);
             boolean offline = isOfflineStatus(status);
             TextView badge = new TextView(this);
@@ -3784,10 +3830,20 @@ public class MainActivity extends Activity {
             return "-";
         }
         String value = status.trim();
-        if ("1".equals(value) || "online".equalsIgnoreCase(value) || "true".equalsIgnoreCase(value) || "在线".equals(value)) {
+        if ("1".equals(value)
+                || "online".equalsIgnoreCase(value)
+                || "true".equalsIgnoreCase(value)
+                || "yes".equalsIgnoreCase(value)
+                || "on".equalsIgnoreCase(value)
+                || "在线".equals(value)) {
             return "在线";
         }
-        if ("0".equals(value) || "offline".equalsIgnoreCase(value) || "false".equalsIgnoreCase(value) || "离线".equals(value)) {
+        if ("0".equals(value)
+                || "offline".equalsIgnoreCase(value)
+                || "false".equalsIgnoreCase(value)
+                || "no".equalsIgnoreCase(value)
+                || "off".equalsIgnoreCase(value)
+                || "离线".equals(value)) {
             return "离线";
         }
         return value;
@@ -3796,7 +3852,79 @@ public class MainActivity extends Activity {
     private boolean isOfflineStatus(String status) {
         String text = onlineStatusText(status);
         String raw = String.valueOf(status).trim();
-        return "离线".equals(text) || "0".equals(raw) || "offline".equalsIgnoreCase(raw) || "false".equalsIgnoreCase(raw);
+        return "离线".equals(text)
+                || "0".equals(raw)
+                || "offline".equalsIgnoreCase(raw)
+                || "false".equalsIgnoreCase(raw)
+                || "no".equalsIgnoreCase(raw)
+                || "off".equalsIgnoreCase(raw);
+    }
+
+    private String sensorOnlineStatusText(JSONObject device) {
+        String raw = sensorOnlineStatusRaw(device);
+        if (raw.length() > 0) {
+            String status = onlineStatusText(raw);
+            if ("在线".equals(status) || "离线".equals(status)) {
+                return status;
+            }
+        }
+        if (isDeviceUpdateStale(device)) {
+            return "离线";
+        }
+        return raw.length() > 0 ? onlineStatusText(raw) : "-";
+    }
+
+    private boolean isSensorOffline(JSONObject device) {
+        String raw = sensorOnlineStatusRaw(device);
+        if (raw.length() > 0) {
+            String status = onlineStatusText(raw);
+            if ("离线".equals(status)) {
+                return true;
+            }
+            if ("在线".equals(status)) {
+                return false;
+            }
+        }
+        return isDeviceUpdateStale(device);
+    }
+
+    private String sensorOnlineStatusRaw(JSONObject device) {
+        return firstValue(
+                device,
+                "onlineStatus", "online_status", "onlineState", "online_state",
+                "onlineFlag", "online_flag", "onlineStatusFlag", "online_status_flag",
+                "netStatus", "net_status", "networkStatus", "network_status",
+                "linkStatus", "link_status", "connectStatus", "connect_status",
+                "isOnline", "online", "status"
+        );
+    }
+
+    private boolean isDeviceUpdateStale(JSONObject device) {
+        String time = firstValue(device, "updateTime", "update_time", "lastTime", "last_time", "lastOnlineTime", "lastReportTime");
+        if (time.length() == 0) {
+            return false;
+        }
+        try {
+            String normalized = time.length() >= 19 ? time.substring(0, 19).replace("T", " ") : time;
+            Date updated = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.CHINA).parse(normalized);
+            return updated != null && System.currentTimeMillis() - updated.getTime() > 10 * 60 * 1000;
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    private TextView sensorStatusChip(JSONObject device) {
+        String text = sensorOnlineStatusText(device);
+        boolean offline = "离线".equals(text);
+        boolean unknown = "-".equals(text);
+        TextView chip = new TextView(this);
+        chip.setText(text);
+        chip.setTextSize(11);
+        chip.setTypeface(null, 1);
+        chip.setGravity(Gravity.CENTER);
+        chip.setTextColor(offline || unknown ? 0xff64748b : 0xff059669);
+        chip.setBackground(roundedStroke(offline || unknown ? 0xfff1f5f9 : 0xffecfdf5, 13, offline || unknown ? 0xffcbd5e1 : 0xff86efac));
+        return chip;
     }
 
     private String alarmStatusText(String status) {
