@@ -153,12 +153,32 @@ public class AlarmMonitorService extends Service {
             if (alarm == null) {
                 continue;
             }
+            if (isOfflineSensorAlarm(alarm)) {
+                continue;
+            }
             String state = firstValue(alarm, "state", "status", "type");
             if (state.length() == 0 || !isAlarmCleared(state)) {
                 count++;
             }
         }
         return count;
+    }
+
+    private boolean isOfflineSensorAlarm(JSONObject alarm) {
+        if (alarm == null) {
+            return false;
+        }
+        String text = (alarm.optString("title") + " "
+                + alarm.optString("name") + " "
+                + alarm.optString("type") + " "
+                + alarm.optString("msg") + " "
+                + alarm.optString("message") + " "
+                + alarm.optString("remark") + " "
+                + alarm.optString("detail")).toLowerCase();
+        return text.contains("离线")
+                || text.contains("掉线")
+                || text.contains("断线")
+                || text.contains("offline");
     }
 
     private void applyAlarmCount(int count) {
