@@ -23,13 +23,18 @@ import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.text.SimpleDateFormat;
+import java.util.Date;
 
 public class AlarmMonitorService extends Service {
     private static final String BASE_URL = "http://iot.mitebo.cn/prod-api";
     private static final String PREFS = "mitebo_iot";
     private static final String PREF_ALARM_SOUND_URI = "alarm_sound_uri";
     private static final String PREF_ALARM_SOUND_ENABLED = "alarm_sound_enabled";
+    private static final String PREF_OFFLINE_MOULD_ALARM_SOUND = "offline_mould_alarm_sound";
     private static final String PREF_BACKGROUND_ALARM_MONITOR = "background_alarm_monitor";
+    private static final String PREF_OFFLINE_ALARM_MOULD_IDS = "offline_alarm_mould_ids";
+    private static final String APP_EXPIRE_AT = "2026-08-31 23:59:59";
     private static final String ALARM_CHANNEL_ID = "alarm_badge";
     private static final String MONITOR_CHANNEL_ID = "alarm_monitor";
     private static final int ALARM_NOTIFICATION_ID = 1024;
@@ -39,6 +44,7 @@ public class AlarmMonitorService extends Service {
     private final Handler handler = new Handler(Looper.getMainLooper());
     private boolean polling = false;
     private int activeAlarmCount = 0;
+    private int audibleAlarmCount = 0;
     private Ringtone activeRingtone;
     private boolean alarmSoundLooping = false;
 
@@ -53,7 +59,7 @@ public class AlarmMonitorService extends Service {
     private final Runnable soundRepeater = new Runnable() {
         @Override
         public void run() {
-            if (!alarmSoundLooping || activeAlarmCount <= 0) {
+            if (!alarmSoundLooping || audibleAlarmCount <= 0) {
                 stopAlarmSoundLoop();
                 return;
             }
@@ -76,7 +82,9 @@ public class AlarmMonitorService extends Service {
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         String token = token();
-        if (token.length() == 0 || !backgroundAlarmMonitorEnabled()) {
+        if (isAppExpired() || token.length() == 0 || !backgroundAlarmMonitorEnabled()) {
+            clearAlarmNotification();
+            stopAlarmSoundLoop();
             stopSelf();
             return START_NOT_STICKY;
         }
@@ -103,7 +111,7 @@ public class AlarmMonitorService extends Service {
 
     private void pollAlarmState() {
         String token = token();
-        if (token.length() == 0 || !backgroundAlarmMonitorEnabled()) {
+        if (isAppExpired() || token.length() == 0 || !backgroundAlarmMonitorEnabled()) {
             clearAlarmNotification();
             stopAlarmSoundLoop();
             stopSelf();
@@ -111,6 +119,7 @@ public class AlarmMonitorService extends Service {
         }
         new Thread(() -> {
             int count = activeAlarmCount;
+            int audible = audibleAlarmCount;
             boolean ok = false;
             try {
                 HttpURLConnection connection = (HttpURLConnection) new URL(BASE_URL + "/yujing/alarm/list?pageNum=1&pageSize=50").openConnection();
@@ -126,21 +135,32 @@ public class AlarmMonitorService extends Service {
                     JSONObject json = new JSONObject(body);
                     JSONArray rows = json.optJSONArray("rows");
                     count = countActiveAlarms(rows);
+                    audible = countAudibleAlarms(rows);
                     ok = true;
                 }
                 connection.disconnect();
             } catch (Exception ignored) {
             }
             int finalCount = count;
+            int finalAudible = audible;
             boolean finalOk = ok;
             handler.post(() -> {
                 if (finalOk) {
-                    applyAlarmCount(finalCount);
+                    applyAlarmCount(finalCount, finalAudible);
                 } else {
-                    applyAlarmCount(0);
+                    applyAlarmCount(0, 0);
                 }
             });
         }).start();
+    }
+
+    private boolean isAppExpired() {
+        try {
+            Date expireAt = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.CHINA).parse(APP_EXPIRE_AT);
+            return expireAt != null && System.currentTimeMillis() > expireAt.getTime();
+        } catch (Exception ignored) {
+            return false;
+        }
     }
 
     private int countActiveAlarms(JSONArray rows) {
@@ -153,7 +173,22 @@ public class AlarmMonitorService extends Service {
             if (alarm == null) {
                 continue;
             }
-            if (isOfflineSensorAlarm(alarm)) {
+            String state = firstValue(alarm, "state", "status", "type");
+            if (state.length() == 0 || !isAlarmCleared(state)) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    private int countAudibleAlarms(JSONArray rows) {
+        int count = 0;
+        if (rows == null) {
+            return 0;
+        }
+        for (int i = 0; i < rows.length(); i++) {
+            JSONObject alarm = rows.optJSONObject(i);
+            if (alarm == null || (isOfflineSensorAlarm(alarm) && !offlineMouldAlarmSoundEnabled())) {
                 continue;
             }
             String state = firstValue(alarm, "state", "status", "type");
@@ -171,21 +206,50 @@ public class AlarmMonitorService extends Service {
         String text = (alarm.optString("title") + " "
                 + alarm.optString("name") + " "
                 + alarm.optString("type") + " "
+                + alarm.optString("state") + " "
+                + alarm.optString("status") + " "
                 + alarm.optString("msg") + " "
                 + alarm.optString("message") + " "
                 + alarm.optString("remark") + " "
                 + alarm.optString("detail")).toLowerCase();
-        return text.contains("离线")
+        if (text.contains("离线")
                 || text.contains("掉线")
                 || text.contains("断线")
-                || text.contains("offline");
+                || text.contains("offline")) {
+            return true;
+        }
+        String mouldId = firstValue(alarm, "mouldId", "mould_id");
+        JSONObject mould = alarm.optJSONObject("mould");
+        if (mouldId.length() == 0 && mould != null) {
+            mouldId = mould.optString("id");
+        }
+        return mouldId.length() > 0 && isKnownOfflineMould(mouldId);
     }
 
-    private void applyAlarmCount(int count) {
+    private boolean isKnownOfflineMould(String mouldId) {
+        String saved = prefs().getString(PREF_OFFLINE_ALARM_MOULD_IDS, "");
+        if (saved.length() == 0) {
+            return false;
+        }
+        String[] ids = saved.split(",");
+        for (String id : ids) {
+            if (mouldId.equals(id.trim())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void applyAlarmCount(int count, int audibleCount) {
         activeAlarmCount = Math.max(0, count);
+        audibleAlarmCount = Math.max(0, audibleCount);
         if (activeAlarmCount > 0) {
             showAlarmNotification(activeAlarmCount);
-            startAlarmSoundLoop();
+            if (audibleAlarmCount > 0) {
+                startAlarmSoundLoop();
+            } else {
+                stopAlarmSoundLoop();
+            }
         } else {
             clearAlarmNotification();
             stopAlarmSoundLoop();
@@ -315,6 +379,10 @@ public class AlarmMonitorService extends Service {
 
     private boolean alarmSoundEnabled() {
         return prefs().getBoolean(PREF_ALARM_SOUND_ENABLED, true);
+    }
+
+    private boolean offlineMouldAlarmSoundEnabled() {
+        return prefs().getBoolean(PREF_OFFLINE_MOULD_ALARM_SOUND, false);
     }
 
     private boolean backgroundAlarmMonitorEnabled() {
