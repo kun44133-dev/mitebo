@@ -36,6 +36,7 @@ final class AlarmAlertController {
     }
 
     static synchronized void start(Context context, Uri uri, boolean vibrationEnabled) {
+        // 全局只允许一个告警铃声实例，避免多条告警或前后台同时触发时声音重叠。
         stop(context);
         if (context == null || uri == null) {
             return;

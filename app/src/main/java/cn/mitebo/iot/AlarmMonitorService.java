@@ -121,6 +121,7 @@ public class AlarmMonitorService extends Service {
             stopSelf();
             return;
         }
+        // 后台轮询只读取告警列表，不刷新设备压力，避免后台任务影响静止压力采集和锁定。
         new Thread(() -> {
             int count = activeAlarmCount;
             int audible = audibleAlarmCount;
@@ -190,6 +191,7 @@ public class AlarmMonitorService extends Service {
         if (rows == null) {
             return 0;
         }
+        // 离线模具开关只控制是否响铃；未消除告警仍由 countActiveAlarms 计入角标。
         for (int i = 0; i < rows.length(); i++) {
             JSONObject alarm = rows.optJSONObject(i);
             if (alarm == null || (isOfflineSensorAlarm(alarm) && !offlineMouldAlarmSoundEnabled())) {

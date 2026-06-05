@@ -493,7 +493,7 @@ public class MainActivity extends Activity {
         panel.addView(tip, topMargin(dp(14)));
 
         TextView version = new TextView(this);
-        version.setText("作者 kunkun  版本号 1.0.4");
+        version.setText("作者 kunkun  版本号 1.0.5");
         version.setTextSize(13);
         version.setTextColor(0xffb7c9d9);
         version.setGravity(Gravity.CENTER);
@@ -742,7 +742,7 @@ public class MainActivity extends Activity {
         ScrollView scroll = new ScrollView(this);
         content = new LinearLayout(this);
         content.setOrientation(LinearLayout.VERTICAL);
-        content.setPadding(dp(12), currentTab == 0 ? dp(2) : currentTab == 1 || currentTab == 2 ? dp(2) : dp(8), dp(12), dp(24));
+        content.setPadding(dp(12), currentTab == 0 ? dp(2) : currentTab == 1 || currentTab == 2 ? dp(2) : dp(8), dp(12), contentBottomPadding());
         scroll.addView(content);
         attachPullRefresh(scroll);
         page.addView(scroll, new LinearLayout.LayoutParams(
@@ -759,6 +759,13 @@ public class MainActivity extends Activity {
         loadList(true);
         schedulePressureRefresh();
         scheduleAlarmRefresh();
+    }
+
+    private int contentBottomPadding() {
+        if (currentTab != 2) {
+            return dp(24);
+        }
+        return dp(MOULD_TOGGLE_HEIGHT_DP + BOTTOM_NAV_HEIGHT_DP + 28);
     }
 
     private void startAlarmMonitorService() {
@@ -1013,6 +1020,7 @@ public class MainActivity extends Activity {
                 }
             }
         }
+        // 角标按全部未消除告警统计，响铃只统计允许发声的告警，避免离线模具静音开关影响角标显示。
         boolean newAudibleAlarm = soundableCount > oldAudibleCount
                 || (soundableCount >= oldAudibleCount && oldAudibleCount > 0 && latestAudibleKey.length() > 0 && !latestAudibleKey.equals(lastAudibleAlarmKey));
         unreadAlarmCount = activeCount;
@@ -2488,6 +2496,7 @@ public class MainActivity extends Activity {
     }
 
     private boolean isMouldBusyByWebRule(JSONObject mould) {
+        // 模具在线/离线跟随网页规则：优先使用后端状态字段，只有没有明确状态时才回退到文本识别。
         String state = firstValue(mould, "state", "status", "mouldState", "mould_state");
         if ("2".equals(state)) {
             return true;
@@ -2551,12 +2560,14 @@ public class MainActivity extends Activity {
         if (pressure == null || key.length() == 0) {
             return;
         }
+        // 模具在线生产时只记录“见过动态压力”，不采集静止压力，避免动态压力把已锁定值顶掉。
         if (!allowOfflineCapture) {
             dynamicSeenByDevice.put(key, true);
             stableCandidatePressureByDevice.remove(key);
             stableSinceByDevice.remove(key);
             return;
         }
+        // 已采集的静止压力保持锁定；只有经历过生产动态后再次下线，才开启下一轮静止采集。
         if (Boolean.TRUE.equals(staticPressureCapturedByDevice.get(key))) {
             if (Boolean.TRUE.equals(dynamicSeenByDevice.get(key))) {
                 staticPressureCapturedByDevice.put(key, false);
@@ -2569,6 +2580,7 @@ public class MainActivity extends Activity {
             staticPressureCapturedByDevice.put(key, true);
             return;
         }
+        // 下线后压力连续稳定达到阈值时间，才同步为新的静止压力。
         long now = System.currentTimeMillis();
         Double candidate = stableCandidatePressureByDevice.get(key);
         if (candidate == null || Math.abs(pressure - candidate) >= STATIC_PRESSURE_STABLE_DELTA) {
@@ -4122,11 +4134,152 @@ public class MainActivity extends Activity {
     }
 
     private void showAlarmLimitDialog(JSONObject alarm) {
-        JSONObject sensor = firstAlarmSensor(alarm);
-        if (sensor == null) {
+        List<JSONObject> sensors = alarmSensors(alarm);
+        if (sensors.isEmpty()) {
             toast("未找到报警传感器");
             return;
         }
+        // 多传感器告警先按模具拉取完整设备信息，再与告警详情匹配，保证保存上下限时带上设备 ID。
+        String mouldId = alarmMouldId(alarm);
+        if (mouldId.length() == 0) {
+            showAlarmLimitSelector(alarm, sensors);
+            return;
+        }
+        setLoading(true);
+        String endpoint = "/yujing/device/list?pageNum=1&pageSize=200&mouldId=" + mouldId;
+        new ApiTask("GET", endpoint, null, true, result -> {
+            setLoading(false);
+            if (!result.ok) {
+                showAlarmLimitSelector(alarm, sensors);
+                return;
+            }
+            try {
+                JSONObject json = new JSONObject(result.body);
+                JSONArray rows = json.optJSONArray("rows");
+                showAlarmLimitSelector(alarm, resolveAlarmSensors(sensors, rows));
+            } catch (Exception e) {
+                showAlarmLimitSelector(alarm, sensors);
+            }
+        }).execute();
+    }
+
+    private List<JSONObject> alarmSensors(JSONObject alarm) {
+        List<JSONObject> sensors = new ArrayList<>();
+        JSONArray details = alarmDetails(alarm);
+        if (details == null || details.length() == 0) {
+            return sensors;
+        }
+        for (int i = 0; i < details.length(); i++) {
+            JSONObject sensor = details.optJSONObject(i);
+            if (sensor != null) {
+                sensors.add(sensor);
+            }
+        }
+        return sensors;
+    }
+
+    private List<JSONObject> resolveAlarmSensors(List<JSONObject> sensors, JSONArray rows) {
+        List<JSONObject> resolved = new ArrayList<>();
+        for (JSONObject sensor : sensors) {
+            JSONObject matched = matchingAlarmDevice(rows, sensor);
+            resolved.add(matched == null ? sensor : mergeAlarmSensor(sensor, matched));
+        }
+        return resolved;
+    }
+
+    private JSONObject mergeAlarmSensor(JSONObject alarmSensor, JSONObject device) {
+        try {
+            JSONObject merged = new JSONObject(device.toString());
+            // 告警详情里的压力/上下限是触发时刻数据，优先展示；设备对象负责提供保存接口需要的完整字段。
+            String pressure = firstValue(alarmSensor, "pressure", "realPressure", "value");
+            if (pressure.length() > 0) {
+                merged.put("pressure", pressure);
+            }
+            String lower = firstValue(alarmSensor, "lower", "lowerLimit", "downLimit");
+            if (lower.length() > 0) {
+                merged.put("lower", lower);
+            }
+            String upper = firstValue(alarmSensor, "upper", "upperLimit", "upLimit");
+            if (upper.length() > 0) {
+                merged.put("upper", upper);
+            }
+            return merged;
+        } catch (Exception ignored) {
+            return device;
+        }
+    }
+
+    private void showAlarmLimitSelector(JSONObject alarm, List<JSONObject> sensors) {
+        if (sensors.size() == 1) {
+            openAlarmSensorLimit(sensors.get(0));
+            return;
+        }
+        LinearLayout form = new LinearLayout(this);
+        form.setOrientation(LinearLayout.VERTICAL);
+        form.setPadding(dp(14), dp(6), dp(14), dp(8));
+
+        List<OptionItem> options = new ArrayList<>();
+        for (int i = 0; i < sensors.size(); i++) {
+            JSONObject sensor = sensors.get(i);
+            String value = firstNonEmpty(deviceKey(sensor), "alarm_sensor_" + i);
+            options.add(new OptionItem(value, sensorLabel(sensor)));
+        }
+
+        Spinner sensorSpinner = spinner(options, options.get(0).value);
+        EditText lower = input("报警下限", false);
+        EditText upper = input("报警上限", false);
+        TextView pressure = meta("实时压力：-");
+        TextView standard = meta("静止压力：-");
+        TextView battery = meta("电池电量：-");
+
+        form.addView(label("报警传感器"));
+        form.addView(sensorSpinner, fixedTop(ViewGroup.LayoutParams.MATCH_PARENT, dp(44), dp(2)));
+        form.addView(pressure, topMargin(dp(8)));
+        form.addView(standard, topMargin(dp(2)));
+        form.addView(battery, topMargin(dp(2)));
+        form.addView(label("报警下限 (" + pressureUnitLabel() + ")"));
+        form.addView(lower, fixedTop(ViewGroup.LayoutParams.MATCH_PARENT, dp(44), dp(4)));
+        form.addView(label("报警上限 (" + pressureUnitLabel() + ")"));
+        form.addView(upper, fixedTop(ViewGroup.LayoutParams.MATCH_PARENT, dp(44), dp(4)));
+
+        sensorSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override
+            public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
+                JSONObject sensor = position >= 0 && position < sensors.size() ? sensors.get(position) : null;
+                fillMouldLimitSensorFields(sensor, lower, upper, pressure, standard, battery);
+            }
+
+            @Override
+            public void onNothingSelected(AdapterView<?> parent) {
+            }
+        });
+        fillMouldLimitSensorFields(sensors.get(0), lower, upper, pressure, standard, battery);
+
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle("告警传感器 - 上下限修改")
+                .setView(form)
+                .setNegativeButton("取消", null)
+                .setPositiveButton("保存", (dialogInterface, which) -> {
+                    int position = sensorSpinner.getSelectedItemPosition();
+                    JSONObject sensor = position >= 0 && position < sensors.size() ? sensors.get(position) : null;
+                    if (sensor == null) {
+                        toast("请选择要修改的传感器");
+                        return;
+                    }
+                    saveDeviceLimits(sensor, lower.getText().toString().trim(), upper.getText().toString().trim());
+                })
+                .create();
+        dialog.setOnShowListener(d -> {
+            if (dialog.getWindow() != null) {
+                int width = (int) (getResources().getDisplayMetrics().widthPixels * 0.92f);
+                dialog.getWindow().setLayout(width, ViewGroup.LayoutParams.WRAP_CONTENT);
+            }
+            styleDialogButtons(dialog);
+        });
+        showStyledDialog(dialog);
+    }
+
+    private void openAlarmSensorLimit(JSONObject sensor) {
         if (firstValue(sensor, "id", "deviceId", "sensorId").length() > 0) {
             showDeviceLimitDialog(sensor);
             return;
@@ -4148,8 +4301,8 @@ public class MainActivity extends Activity {
                 try {
                     JSONObject json = new JSONObject(result.body);
                     JSONArray rows = json.optJSONArray("rows");
-                    JSONObject matched = firstMatchingAlarmDevice(rows, keyword);
-                    showDeviceLimitDialog(matched == null ? sensor : matched);
+                    JSONObject matched = matchingAlarmDevice(rows, sensor);
+                    showDeviceLimitDialog(matched == null ? sensor : mergeAlarmSensor(sensor, matched));
                 } catch (Exception e) {
                     showDeviceLimitDialog(sensor);
                 }
@@ -4158,20 +4311,6 @@ public class MainActivity extends Activity {
             setLoading(false);
             showDeviceLimitDialog(sensor);
         }
-    }
-
-    private JSONObject firstAlarmSensor(JSONObject alarm) {
-        JSONArray details = alarmDetails(alarm);
-        if (details == null || details.length() == 0) {
-            return null;
-        }
-        for (int i = 0; i < details.length(); i++) {
-            JSONObject sensor = details.optJSONObject(i);
-            if (sensor != null) {
-                return sensor;
-            }
-        }
-        return null;
     }
 
     private JSONObject firstMatchingAlarmDevice(JSONArray rows, String keyword) {
@@ -4195,6 +4334,33 @@ public class MainActivity extends Activity {
             }
         }
         return fallback;
+    }
+
+    private JSONObject matchingAlarmDevice(JSONArray rows, JSONObject sensor) {
+        if (rows == null || rows.length() == 0 || sensor == null) {
+            return null;
+        }
+        String id = firstValue(sensor, "id", "deviceId", "sensorId");
+        String number = firstValue(sensor, "number", "deviceNumber", "mac", "macAddress");
+        String name = firstValue(sensor, "name", "deviceName");
+        for (int i = 0; i < rows.length(); i++) {
+            JSONObject device = rows.optJSONObject(i);
+            if (device == null) {
+                continue;
+            }
+            if (id.length() > 0 && id.equals(firstValue(device, "id", "deviceId", "sensorId"))) {
+                return device;
+            }
+            String deviceNumber = firstValue(device, "number", "deviceNumber", "mac", "macAddress");
+            if (number.length() > 0 && number.equalsIgnoreCase(deviceNumber)) {
+                return device;
+            }
+            String deviceName = firstValue(device, "name", "deviceName");
+            if (name.length() > 0 && name.equalsIgnoreCase(deviceName)) {
+                return device;
+            }
+        }
+        return null;
     }
 
     private String sensorName(JSONObject sensor) {
