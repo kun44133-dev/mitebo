@@ -24,6 +24,8 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.VibrationEffect;
+import android.os.Vibrator;
 import android.text.Editable;
 import android.text.InputType;
 import android.text.TextUtils;
@@ -74,6 +76,7 @@ public class MainActivity extends Activity {
     private static final String PREFS = "mitebo_iot";
     private static final String PREF_ALARM_SOUND_URI = "alarm_sound_uri";
     private static final String PREF_ALARM_SOUND_ENABLED = "alarm_sound_enabled";
+    private static final String PREF_ALARM_VIBRATION_ENABLED = "alarm_vibration_enabled";
     private static final String PREF_OFFLINE_MOULD_ALARM_SOUND = "offline_mould_alarm_sound";
     private static final String PREF_BACKGROUND_ALARM_MONITOR = "background_alarm_monitor";
     private static final String PREF_PRESSURE_UNIT = "pressure_unit";
@@ -146,6 +149,7 @@ public class MainActivity extends Activity {
     private long lastAlarmSoundAt = 0;
     private Ringtone activeAlarmRingtone;
     private boolean alarmSoundLooping = false;
+    private boolean alarmVibrationLooping = false;
     private final List<String> expandedMouldIds = new ArrayList<>();
     private final List<String> expandedAlarmIds = new ArrayList<>();
     private final List<String> expandedGatewayIds = new ArrayList<>();
@@ -157,10 +161,12 @@ public class MainActivity extends Activity {
     private final Map<String, Boolean> dynamicSeenByDevice = new HashMap<>();
     private final Map<String, Long> activeMouldUntil = new HashMap<>();
     private final Map<String, Boolean> mouldBusyById = new HashMap<>();
+    private final Set<String> activeAlarmMouldIds = new HashSet<>();
     private final Set<String> offlineAlarmMouldIds = new HashSet<>();
     private final Map<String, TextView> visiblePressureViews = new HashMap<>();
     private final Map<String, TextView> visibleStandardViews = new HashMap<>();
     private final Map<String, TextView> visibleUpdateViews = new HashMap<>();
+    private final Map<String, ImageView> visibleMouldAlarmIcons = new HashMap<>();
     private final Map<String, JSONArray> mouldDropdownDeviceCache = new HashMap<>();
     private final Handler refreshHandler = new Handler(Looper.getMainLooper());
     private final Runnable pressureRefresh = new Runnable() {
@@ -398,7 +404,7 @@ public class MainActivity extends Activity {
         page.addView(title, topMargin(dp(2)));
 
         TextView subtitle = new TextView(this);
-        subtitle.setText("设备状态、模具压力、告警联动");
+        subtitle.setText("氮气弹簧时实压力、设备状态、告警联动");
         subtitle.setTextSize(15);
         subtitle.setTextColor(0xffb7c9d9);
         subtitle.setGravity(Gravity.CENTER);
@@ -487,7 +493,7 @@ public class MainActivity extends Activity {
         panel.addView(tip, topMargin(dp(14)));
 
         TextView version = new TextView(this);
-        version.setText("作者 kunkun  版本号 1.0.3");
+        version.setText("作者 kunkun  版本号 1.0.4");
         version.setTextSize(13);
         version.setTextColor(0xffb7c9d9);
         version.setGravity(Gravity.CENTER);
@@ -984,6 +990,7 @@ public class MainActivity extends Activity {
         int soundableCount = 0;
         String latestActiveKey = "";
         String latestAudibleKey = "";
+        Set<String> latestAlarmMouldIds = new HashSet<>();
         if (rows != null) {
             for (int i = 0; i < rows.length(); i++) {
                 JSONObject alarm = rows.optJSONObject(i);
@@ -991,6 +998,10 @@ public class MainActivity extends Activity {
                     continue;
                 }
                 activeCount++;
+                String mouldId = alarmMouldId(alarm);
+                if (mouldId.length() > 0) {
+                    latestAlarmMouldIds.add(mouldId);
+                }
                 if (shouldAlarmMakeSound(alarm)) {
                     soundableCount++;
                     if (latestAudibleKey.length() == 0) {
@@ -1006,9 +1017,12 @@ public class MainActivity extends Activity {
                 || (soundableCount >= oldAudibleCount && oldAudibleCount > 0 && latestAudibleKey.length() > 0 && !latestAudibleKey.equals(lastAudibleAlarmKey));
         unreadAlarmCount = activeCount;
         audibleAlarmCount = soundableCount;
+        activeAlarmMouldIds.clear();
+        activeAlarmMouldIds.addAll(latestAlarmMouldIds);
         lastSeenAlarmKey = latestActiveKey;
         lastAudibleAlarmKey = latestAudibleKey;
         updateLauncherAlarmBadge();
+        updateVisibleMouldAlarmBadges();
         if (activeCount > 0) {
             if (soundableCount > 0 && allowSound && newAudibleAlarm) {
                 startAlarmSoundLoop();
@@ -1035,6 +1049,35 @@ public class MainActivity extends Activity {
         return isActiveAlarm(alarm) && (!isOfflineSensorAlarm(alarm) || offlineMouldAlarmSoundEnabled());
     }
 
+    private String alarmMouldId(JSONObject alarm) {
+        if (alarm == null) {
+            return "";
+        }
+        String mouldId = firstValue(alarm, "mouldId", "mould_id");
+        JSONObject mould = alarm.optJSONObject("mould");
+        if (mouldId.length() == 0 && mould != null) {
+            mouldId = mould.optString("id");
+        }
+        JSONArray details = alarmDetails(alarm);
+        if (mouldId.length() == 0 && details != null) {
+            for (int i = 0; i < details.length(); i++) {
+                JSONObject detail = details.optJSONObject(i);
+                if (detail == null) {
+                    continue;
+                }
+                mouldId = firstValue(detail, "mouldId", "mould_id");
+                JSONObject detailMould = detail.optJSONObject("mould");
+                if (mouldId.length() == 0 && detailMould != null) {
+                    mouldId = detailMould.optString("id");
+                }
+                if (mouldId.length() > 0) {
+                    break;
+                }
+            }
+        }
+        return mouldId;
+    }
+
     private boolean matchesAlarmFilter(JSONObject alarm) {
         return currentTab != 1 || !alarmUnclearedOnly || isActiveAlarm(alarm);
     }
@@ -1058,11 +1101,7 @@ public class MainActivity extends Activity {
                 || text.contains("offline")) {
             return true;
         }
-        String mouldId = firstValue(alarm, "mouldId", "mould_id");
-        JSONObject mould = alarm.optJSONObject("mould");
-        if (mouldId.length() == 0 && mould != null) {
-            mouldId = mould.optString("id");
-        }
+        String mouldId = alarmMouldId(alarm);
         return mouldId.length() > 0 && offlineAlarmMouldIds.contains(mouldId);
     }
 
@@ -1085,6 +1124,7 @@ public class MainActivity extends Activity {
                 ringtone.setLooping(false);
             }
             ringtone.play();
+            AlarmAlertController.vibrateOnce(getApplicationContext(), alarmVibrationEnabled());
             Ringtone finalRingtone = ringtone;
             refreshHandler.postDelayed(() -> {
                 try {
@@ -1110,20 +1150,11 @@ public class MainActivity extends Activity {
             if (uri == null) {
                 return;
             }
-            activeAlarmRingtone = RingtoneManager.getRingtone(getApplicationContext(), uri);
-            if (activeAlarmRingtone == null) {
-                return;
-            }
             alarmSoundLooping = true;
-            if (Build.VERSION.SDK_INT >= 28) {
-                activeAlarmRingtone.setLooping(true);
-            }
-            activeAlarmRingtone.play();
-            if (Build.VERSION.SDK_INT < 28) {
-                refreshHandler.postDelayed(alarmSoundRepeater, 3000);
-            }
+            AlarmAlertController.start(getApplicationContext(), uri, alarmVibrationEnabled());
         } catch (Exception ignored) {
             alarmSoundLooping = false;
+            stopAlarmVibrationLoop();
         }
     }
 
@@ -1147,6 +1178,7 @@ public class MainActivity extends Activity {
     private void stopAlarmSoundLoop() {
         refreshHandler.removeCallbacks(alarmSoundRepeater);
         alarmSoundLooping = false;
+        AlarmAlertController.stop(getApplicationContext());
         if (activeAlarmRingtone != null) {
             try {
                 if (activeAlarmRingtone.isPlaying()) {
@@ -1156,6 +1188,23 @@ public class MainActivity extends Activity {
             }
             activeAlarmRingtone = null;
         }
+    }
+
+    private void vibrateOnce() {
+        AlarmAlertController.vibrateOnce(getApplicationContext(), alarmVibrationEnabled());
+    }
+
+    private void startAlarmVibrationLoop() {
+        if (!alarmVibrationEnabled() || alarmVibrationLooping) {
+            return;
+        }
+        alarmVibrationLooping = true;
+        AlarmAlertController.startVibrationLoop(getApplicationContext());
+    }
+
+    private void stopAlarmVibrationLoop() {
+        alarmVibrationLooping = false;
+        AlarmAlertController.stopVibrationLoop(getApplicationContext());
     }
 
     private Uri selectedAlarmSoundUri() {
@@ -1178,6 +1227,10 @@ public class MainActivity extends Activity {
 
     private boolean alarmSoundEnabled() {
         return getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean(PREF_ALARM_SOUND_ENABLED, true);
+    }
+
+    private boolean alarmVibrationEnabled() {
+        return getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean(PREF_ALARM_VIBRATION_ENABLED, true);
     }
 
     private boolean offlineMouldAlarmSoundEnabled() {
@@ -1843,6 +1896,21 @@ public class MainActivity extends Activity {
                 startAlarmSoundLoop();
             }
         }), topMargin(dp(8)));
+        preferenceCard.addView(settingsDivider());
+        preferenceCard.addView(settingsSwitchRow(
+                "报警震动",
+                "有告警提醒时同步震动",
+                alarmVibrationEnabled(),
+                (buttonView, isChecked) -> {
+            getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                    .putBoolean(PREF_ALARM_VIBRATION_ENABLED, isChecked)
+                    .apply();
+            if (!isChecked) {
+                stopAlarmVibrationLoop();
+            } else if (alarmSoundLooping && audibleAlarmCount > 0) {
+                startAlarmVibrationLoop();
+            }
+        }));
         preferenceCard.addView(settingsDivider());
         preferenceCard.addView(settingsSwitchRow(
                 "离线模具报警声音",
@@ -2907,25 +2975,27 @@ public class MainActivity extends Activity {
         boolean expanded = expandedAlarmIds.contains(key);
         LinearLayout card = new LinearLayout(this);
         card.setOrientation(LinearLayout.VERTICAL);
-        card.setPadding(dp(14), dp(12), dp(14), expanded ? dp(12) : dp(10));
+        card.setPadding(dp(12), dp(10), dp(12), expanded ? dp(10) : dp(9));
         card.setBackground(roundedStroke(SURFACE, 14, 0xffdfe8f2));
-        smoothElevation(card, 3);
+        smoothElevation(card, 2);
 
         LinearLayout head = new LinearLayout(this);
         head.setOrientation(LinearLayout.HORIZONTAL);
         head.setGravity(Gravity.CENTER_VERTICAL);
 
-        TextView icon = new TextView(this);
         boolean active = isActiveAlarm(item);
-        icon.setText("●");
-        icon.setTextSize(22);
-        icon.setTextColor(active ? RED : GREEN);
-        icon.setGravity(Gravity.CENTER);
-        head.addView(icon, new LinearLayout.LayoutParams(dp(34), dp(34)));
+        ImageView icon = new ImageView(this);
+        icon.setImageResource(R.drawable.ic_alarm);
+        icon.setColorFilter(active ? RED : GREEN);
+        icon.setPadding(dp(6), dp(6), dp(6), dp(6));
+        icon.setBackground(rounded(active ? 0xfffff1f2 : 0xffecfdf5, 12));
+        LinearLayout.LayoutParams iconParams = new LinearLayout.LayoutParams(dp(30), dp(30));
+        iconParams.rightMargin = dp(8);
+        head.addView(icon, iconParams);
 
         TextView title = new TextView(this);
         title.setText(alarmTitle(item));
-        title.setTextSize(16);
+        title.setTextSize(15);
         title.setTextColor(INK);
         title.setTypeface(null, 1);
         title.setSingleLine(false);
@@ -2953,9 +3023,9 @@ public class MainActivity extends Activity {
         } else {
             TextView summary = new TextView(this);
             summary.setText(alarmSummary(item));
-            summary.setTextSize(12);
+            summary.setTextSize(11);
             summary.setTextColor(MUTED);
-            summary.setPadding(dp(34), dp(4), 0, 0);
+            summary.setPadding(dp(38), dp(2), 0, 0);
             summaryView[0] = summary;
             card.addView(summary);
         }
@@ -2967,7 +3037,7 @@ public class MainActivity extends Activity {
                 summaryView[0].setVisibility(nextExpanded ? View.GONE : View.VISIBLE);
             }
             arrow.setText(nextExpanded ? "▲" : "▼");
-            card.setPadding(dp(14), dp(12), dp(14), nextExpanded ? dp(12) : dp(10));
+            card.setPadding(dp(12), dp(10), dp(12), nextExpanded ? dp(10) : dp(9));
             if (nextExpanded) {
                 if (!expandedAlarmIds.contains(key)) {
                     expandedAlarmIds.add(key);
@@ -2999,12 +3069,12 @@ public class MainActivity extends Activity {
             addInfoItem(info, "网关", (gateway.optString("number") + " " + gateway.optString("name")).trim());
         }
         if (info.getChildCount() > 0) {
-            container.addView(info, topMargin(dp(8)));
+            container.addView(info, topMargin(dp(6)));
         }
 
-        TextView detail = compactAction("详情");
-        detail.setOnClickListener(v -> showDetail(item));
-        container.addView(detail, fixedTop(ViewGroup.LayoutParams.MATCH_PARENT, dp(34), dp(8)));
+        TextView limit = compactAction("上下限修改");
+        limit.setOnClickListener(v -> showAlarmLimitDialog(item));
+        container.addView(limit, fixedTop(ViewGroup.LayoutParams.MATCH_PARENT, dp(32), dp(6)));
     }
 
     private View swipeDeleteAlarmRow(JSONObject item, View card) {
@@ -3262,10 +3332,11 @@ public class MainActivity extends Activity {
         head.setGravity(Gravity.CENTER_VERTICAL);
 
         ImageView icon = new ImageView(this);
-        icon.setImageResource(R.drawable.ic_mould);
-        icon.setColorFilter(BLUE);
         icon.setPadding(dp(7), dp(7), dp(7), dp(7));
-        icon.setBackground(rounded(0xffeef5ff, 11));
+        applyMouldAlarmIcon(icon, mouldId);
+        if (mouldId.length() > 0) {
+            visibleMouldAlarmIcons.put(mouldId, icon);
+        }
         LinearLayout.LayoutParams iconParams = new LinearLayout.LayoutParams(dp(34), dp(34));
         iconParams.rightMargin = dp(10);
         head.addView(icon, iconParams);
@@ -3380,6 +3451,22 @@ public class MainActivity extends Activity {
         status.setGravity(Gravity.CENTER);
         status.setBackground(roundedStroke(offline ? 0xfffff7ed : 0xffecfdf5, 13, offline ? 0xfffdba74 : 0xff86efac));
         return status;
+    }
+
+    private void applyMouldAlarmIcon(ImageView icon, String mouldId) {
+        boolean alarm = mouldId != null && activeAlarmMouldIds.contains(mouldId);
+        icon.setImageResource(alarm ? R.drawable.ic_alarm : R.drawable.ic_mould);
+        icon.setColorFilter(alarm ? RED : BLUE);
+        icon.setBackground(rounded(alarm ? 0xfffff1f2 : 0xffeef5ff, 11));
+    }
+
+    private void updateVisibleMouldAlarmBadges() {
+        for (Map.Entry<String, ImageView> entry : visibleMouldAlarmIcons.entrySet()) {
+            ImageView icon = entry.getValue();
+            if (icon != null) {
+                applyMouldAlarmIcon(icon, entry.getKey());
+            }
+        }
     }
 
     private String alarmTitle(JSONObject item) {
@@ -3952,6 +4039,7 @@ public class MainActivity extends Activity {
         visiblePressureViews.clear();
         visibleStandardViews.clear();
         visibleUpdateViews.clear();
+        visibleMouldAlarmIcons.clear();
     }
 
     private void addAlarmPressureDetails(LinearLayout card, JSONObject alarm) {
@@ -3961,8 +4049,8 @@ public class MainActivity extends Activity {
             if (detailText.length() > 0 && !"null".equals(detailText)) {
                 TextView detail = meta("报警详情：" + detailText);
                 detail.setBackground(roundedStroke(0xfffbfdff, 12, 0xffe3ebf5));
-                detail.setPadding(dp(12), dp(9), dp(12), dp(9));
-                card.addView(detail, topMargin(dp(8)));
+                detail.setPadding(dp(10), dp(7), dp(10), dp(7));
+                card.addView(detail, topMargin(dp(6)));
             }
             return;
         }
@@ -3973,19 +4061,19 @@ public class MainActivity extends Activity {
             }
             LinearLayout row = new LinearLayout(this);
             row.setOrientation(LinearLayout.VERTICAL);
-            row.setPadding(dp(10), dp(9), dp(10), dp(9));
+            row.setPadding(dp(10), dp(8), dp(10), dp(8));
             row.setBackground(roundedStroke(0xfffbfdff, 12, 0xffe3ebf5));
 
             TextView title = new TextView(this);
             title.setText(sensorName(sensor));
-            title.setTextSize(13);
+            title.setTextSize(12);
             title.setTextColor(INK);
             title.setTypeface(null, 1);
             row.addView(title);
 
             LinearLayout metrics = new LinearLayout(this);
             metrics.setOrientation(LinearLayout.HORIZONTAL);
-            metrics.setPadding(0, dp(7), 0, 0);
+            metrics.setPadding(0, dp(6), 0, 0);
             addCompactMetric(metrics, "压力", pressureWithUnit(sensor.optString("pressure")), 0xfffff1f2, RED);
             addCompactMetric(metrics, "下限", pressureWithUnit(sensor.optString("lower")), 0xfffffbeb, 0xffb45309);
             addCompactMetric(metrics, "上限", pressureWithUnit(sensor.optString("upper")), 0xfffff1f2, 0xffdc2626);
@@ -3996,10 +4084,10 @@ public class MainActivity extends Activity {
             if (!"-".equals(time)) {
                 TextView timeView = meta("告警时间 " + time);
                 timeView.setTextSize(11);
-                row.addView(timeView, topMargin(dp(2)));
+                row.addView(timeView, topMargin(dp(1)));
             }
 
-            LinearLayout.LayoutParams params = topMargin(i == 0 ? dp(8) : dp(8));
+            LinearLayout.LayoutParams params = topMargin(dp(6));
             card.addView(row, params);
         }
     }
@@ -4031,6 +4119,82 @@ public class MainActivity extends Activity {
         } catch (Exception ignored) {
         }
         return null;
+    }
+
+    private void showAlarmLimitDialog(JSONObject alarm) {
+        JSONObject sensor = firstAlarmSensor(alarm);
+        if (sensor == null) {
+            toast("未找到报警传感器");
+            return;
+        }
+        if (firstValue(sensor, "id", "deviceId", "sensorId").length() > 0) {
+            showDeviceLimitDialog(sensor);
+            return;
+        }
+        String keyword = firstValue(sensor, "number", "deviceNumber", "mac", "macAddress", "name", "deviceName");
+        if (keyword.length() == 0) {
+            showDeviceLimitDialog(sensor);
+            return;
+        }
+        setLoading(true);
+        try {
+            String encoded = URLEncoder.encode(keyword, "UTF-8");
+            new ApiTask("GET", "/yujing/device/list?pageNum=1&pageSize=100&number=" + encoded + "&mac=" + encoded + "&macAddress=" + encoded, null, true, result -> {
+                setLoading(false);
+                if (!result.ok) {
+                    showDeviceLimitDialog(sensor);
+                    return;
+                }
+                try {
+                    JSONObject json = new JSONObject(result.body);
+                    JSONArray rows = json.optJSONArray("rows");
+                    JSONObject matched = firstMatchingAlarmDevice(rows, keyword);
+                    showDeviceLimitDialog(matched == null ? sensor : matched);
+                } catch (Exception e) {
+                    showDeviceLimitDialog(sensor);
+                }
+            }).execute();
+        } catch (Exception e) {
+            setLoading(false);
+            showDeviceLimitDialog(sensor);
+        }
+    }
+
+    private JSONObject firstAlarmSensor(JSONObject alarm) {
+        JSONArray details = alarmDetails(alarm);
+        if (details == null || details.length() == 0) {
+            return null;
+        }
+        for (int i = 0; i < details.length(); i++) {
+            JSONObject sensor = details.optJSONObject(i);
+            if (sensor != null) {
+                return sensor;
+            }
+        }
+        return null;
+    }
+
+    private JSONObject firstMatchingAlarmDevice(JSONArray rows, String keyword) {
+        if (rows == null || rows.length() == 0) {
+            return null;
+        }
+        String needle = keyword == null ? "" : keyword.toLowerCase();
+        JSONObject fallback = rows.optJSONObject(0);
+        for (int i = 0; i < rows.length(); i++) {
+            JSONObject device = rows.optJSONObject(i);
+            if (device == null) {
+                continue;
+            }
+            String identity = (device.optString("id") + " "
+                    + device.optString("number") + " "
+                    + device.optString("mac") + " "
+                    + device.optString("macAddress") + " "
+                    + device.optString("name")).toLowerCase();
+            if (needle.length() == 0 || identity.contains(needle)) {
+                return device;
+            }
+        }
+        return fallback;
     }
 
     private String sensorName(JSONObject sensor) {
@@ -4825,8 +4989,8 @@ public class MainActivity extends Activity {
     private LinearLayout infoPanel() {
         LinearLayout panel = new LinearLayout(this);
         panel.setOrientation(LinearLayout.VERTICAL);
-        panel.setPadding(dp(12), dp(10), dp(12), dp(10));
-        panel.setBackground(roundedStroke(SOFT, 14, 0xffe3ebf5));
+        panel.setPadding(dp(10), dp(7), dp(10), dp(7));
+        panel.setBackground(roundedStroke(0xfff8fbff, 12, 0xffe3ebf5));
         return panel;
     }
 
@@ -4837,17 +5001,17 @@ public class MainActivity extends Activity {
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setPadding(0, dp(3), 0, dp(3));
+        row.setPadding(0, dp(2), 0, dp(2));
 
         TextView labelView = new TextView(this);
         labelView.setText(label);
-        labelView.setTextSize(12);
+        labelView.setTextSize(11);
         labelView.setTextColor(0xff7b8795);
-        row.addView(labelView, new LinearLayout.LayoutParams(dp(72), ViewGroup.LayoutParams.WRAP_CONTENT));
+        row.addView(labelView, new LinearLayout.LayoutParams(dp(64), ViewGroup.LayoutParams.WRAP_CONTENT));
 
         TextView valueView = new TextView(this);
         valueView.setText(value);
-        valueView.setTextSize(13);
+        valueView.setTextSize(12);
         valueView.setTextColor(INK);
         valueView.setTypeface(null, 1);
         valueView.setSingleLine(false);
@@ -4890,13 +5054,13 @@ public class MainActivity extends Activity {
         }
         LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
-        box.setPadding(dp(8), dp(7), dp(8), dp(7));
+        box.setPadding(dp(7), dp(6), dp(7), dp(6));
         box.setBackground(roundedStroke(bgColor, 10, 0x12000000));
 
         TextView valueView = new TextView(this);
         valueView.setText(value);
         valueView.setTextColor(textColor);
-        valueView.setTextSize(13);
+        valueView.setTextSize(12);
         valueView.setTypeface(null, 1);
         valueView.setGravity(Gravity.CENTER);
         valueView.setSingleLine(false);
@@ -4905,7 +5069,7 @@ public class MainActivity extends Activity {
         TextView labelView = new TextView(this);
         labelView.setText(label);
         labelView.setTextColor(0xff69778a);
-        labelView.setTextSize(10);
+        labelView.setTextSize(9);
         labelView.setGravity(Gravity.CENTER);
         box.addView(labelView, topMargin(dp(1)));
 

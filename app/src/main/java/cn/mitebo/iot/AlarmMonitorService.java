@@ -14,6 +14,8 @@ import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
+import android.os.VibrationEffect;
+import android.os.Vibrator;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -31,6 +33,7 @@ public class AlarmMonitorService extends Service {
     private static final String PREFS = "mitebo_iot";
     private static final String PREF_ALARM_SOUND_URI = "alarm_sound_uri";
     private static final String PREF_ALARM_SOUND_ENABLED = "alarm_sound_enabled";
+    private static final String PREF_ALARM_VIBRATION_ENABLED = "alarm_vibration_enabled";
     private static final String PREF_OFFLINE_MOULD_ALARM_SOUND = "offline_mould_alarm_sound";
     private static final String PREF_BACKGROUND_ALARM_MONITOR = "background_alarm_monitor";
     private static final String PREF_OFFLINE_ALARM_MOULD_IDS = "offline_alarm_mould_ids";
@@ -47,6 +50,7 @@ public class AlarmMonitorService extends Service {
     private int audibleAlarmCount = 0;
     private Ringtone activeRingtone;
     private boolean alarmSoundLooping = false;
+    private boolean alarmVibrationLooping = false;
 
     private final Runnable pollRunnable = new Runnable() {
         @Override
@@ -269,26 +273,18 @@ public class AlarmMonitorService extends Service {
             if (uri == null) {
                 return;
             }
-            activeRingtone = RingtoneManager.getRingtone(getApplicationContext(), uri);
-            if (activeRingtone == null) {
-                return;
-            }
             alarmSoundLooping = true;
-            if (Build.VERSION.SDK_INT >= 28) {
-                activeRingtone.setLooping(true);
-            }
-            activeRingtone.play();
-            if (Build.VERSION.SDK_INT < 28) {
-                handler.postDelayed(soundRepeater, 3000);
-            }
+            AlarmAlertController.start(getApplicationContext(), uri, alarmVibrationEnabled());
         } catch (Exception ignored) {
             alarmSoundLooping = false;
+            stopAlarmVibrationLoop();
         }
     }
 
     private void stopAlarmSoundLoop() {
         handler.removeCallbacks(soundRepeater);
         alarmSoundLooping = false;
+        AlarmAlertController.stop(getApplicationContext());
         if (activeRingtone != null) {
             try {
                 if (activeRingtone.isPlaying()) {
@@ -298,6 +294,19 @@ public class AlarmMonitorService extends Service {
             }
             activeRingtone = null;
         }
+    }
+
+    private void startAlarmVibrationLoop() {
+        if (!alarmVibrationEnabled() || alarmVibrationLooping) {
+            return;
+        }
+        alarmVibrationLooping = true;
+        AlarmAlertController.startVibrationLoop(getApplicationContext());
+    }
+
+    private void stopAlarmVibrationLoop() {
+        alarmVibrationLooping = false;
+        AlarmAlertController.stopVibrationLoop(getApplicationContext());
     }
 
     private Notification monitorNotification() {
@@ -379,6 +388,10 @@ public class AlarmMonitorService extends Service {
 
     private boolean alarmSoundEnabled() {
         return prefs().getBoolean(PREF_ALARM_SOUND_ENABLED, true);
+    }
+
+    private boolean alarmVibrationEnabled() {
+        return prefs().getBoolean(PREF_ALARM_VIBRATION_ENABLED, true);
     }
 
     private boolean offlineMouldAlarmSoundEnabled() {
