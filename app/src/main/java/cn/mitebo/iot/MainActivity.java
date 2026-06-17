@@ -102,6 +102,7 @@ public class MainActivity extends Activity {
     private static final long DEFAULT_REFRESH_MS = 15000;
     private static final long ALARM_REFRESH_MS = 5000;
     private static final long MOULD_REFRESH_MS = 5000;
+    private static final int ALARM_PAGE_SIZE = 1000;
     private static final int BOTTOM_NAV_HEIGHT_DP = 58;
     private static final int MOULD_TOGGLE_HEIGHT_DP = 40;
     private static final int MOULD_TOGGLE_NAV_GAP_DP = -3;
@@ -133,6 +134,7 @@ public class MainActivity extends Activity {
     private int lastAlarmTotal = -1;
     private int todayAlarmTotal = -1;
     private int historyAlarmTotal = -1;
+    private int alarmTotalRequestVersion = 0;
     private String lastSeenAlarmKey = "";
     private String lastAudibleAlarmKey = "";
     private String alarmDateFilter = "";
@@ -168,6 +170,10 @@ public class MainActivity extends Activity {
     private final Map<String, TextView> visibleUpdateViews = new HashMap<>();
     private final Map<String, ImageView> visibleMouldAlarmIcons = new HashMap<>();
     private final Map<String, JSONArray> mouldDropdownDeviceCache = new HashMap<>();
+    private TextView fixedMouldGatewayCountView;
+    private int listRequestVersion = 0;
+    private int loadingListRequestVersion = 0;
+    private int alarmCountRequestVersion = 0;
     private final Handler refreshHandler = new Handler(Looper.getMainLooper());
     private final Runnable pressureRefresh = new Runnable() {
         @Override
@@ -272,6 +278,9 @@ public class MainActivity extends Activity {
         stopAlarmMonitorService();
         if (token != null && token.length() > 0 && content != null) {
             fetchAlarmCount(true);
+            if (currentTab == 2) {
+                loadList(false);
+            }
             schedulePressureRefresh();
             scheduleAlarmRefresh();
         }
@@ -493,7 +502,7 @@ public class MainActivity extends Activity {
         panel.addView(tip, topMargin(dp(14)));
 
         TextView version = new TextView(this);
-        version.setText("作者 kunkun  版本号 1.0.5");
+        version.setText("作者 kunkun  版本号 1.0.9");
         version.setTextSize(13);
         version.setTextColor(0xffb7c9d9);
         version.setGravity(Gravity.CENTER);
@@ -703,6 +712,7 @@ public class MainActivity extends Activity {
                             expandedMouldIds.clear();
                             expandedAlarmIds.clear();
                             expandedGatewayIds.clear();
+                            resetPressureStateCaches();
                         }
                         migrateLegacyMonitoredMacs(username);
                         showHome();
@@ -731,6 +741,8 @@ public class MainActivity extends Activity {
         refreshHandler.removeCallbacks(alarmRefresh);
         normalizeAlarmDateForCurrentTab();
         root.removeAllViews();
+        loading.setVisibility(View.GONE);
+        fixedMouldGatewayCountView = null;
         LinearLayout page = new LinearLayout(this);
         page.setOrientation(LinearLayout.VERTICAL);
         page.setBackgroundColor(PAGE_BG);
@@ -738,6 +750,7 @@ public class MainActivity extends Activity {
         applyHomeInsets(page);
 
         addContextPanel(page);
+        addFixedMouldGatewaySectionHeader(page);
 
         ScrollView scroll = new ScrollView(this);
         content = new LinearLayout(this);
@@ -862,12 +875,21 @@ public class MainActivity extends Activity {
             showEmpty("设备页默认不显示全部设备，请使用 MAC 查询或添加监控");
             return;
         }
-        if (showProgress) {
+        final int requestVersion = ++listRequestVersion;
+        boolean showGlobalLoading = showProgress && currentTab != 2;
+        if (showGlobalLoading) {
+            loadingListRequestVersion = requestVersion;
             setLoading(true);
         }
         String endpoint = buildListEndpoint();
         new ApiTask("GET", endpoint, null, true, result -> {
-            if (showProgress) {
+            if (requestVersion != listRequestVersion) {
+                if (showGlobalLoading && loadingListRequestVersion == requestVersion) {
+                    setLoading(false);
+                }
+                return;
+            }
+            if (showGlobalLoading) {
                 setLoading(false);
             }
             clearVisibleMouldValueViews();
@@ -892,7 +914,12 @@ public class MainActivity extends Activity {
                     if (alarmHistoryAllMode) {
                         historyAlarmTotal = total;
                     } else if (!alarmUnclearedOnly) {
-                        todayAlarmTotal = countSelectedDateAlarms(rows);
+                        String date = selectedAlarmDate();
+                        int totalVersion = ++alarmTotalRequestVersion;
+                        todayAlarmTotal = countAlarmDate(rows, date);
+                        if (rows != null && rows.length() >= ALARM_PAGE_SIZE) {
+                            fetchAlarmDateTotalPage(date, 2, todayAlarmTotal, totalVersion);
+                        }
                     }
                     updateAlarmAllChipText();
                     syncActiveAlarmState(rows, false, true);
@@ -906,7 +933,7 @@ public class MainActivity extends Activity {
                     return;
                 }
                 if (currentTab == 2) {
-                    renderPressureMoulds(rows);
+                    renderPressureMoulds(rows, requestVersion);
                     return;
                 }
                 addSectionTitle(currentTab == 1 ? alarmListTitle() : tabTitles[currentTab] + "列表");
@@ -955,39 +982,93 @@ public class MainActivity extends Activity {
     }
 
     private int countSelectedDateAlarms(JSONArray rows) {
+        return countAlarmDate(rows, selectedAlarmDate());
+    }
+
+    private int countAlarmDate(JSONArray rows, String date) {
         if (rows == null) {
             return 0;
         }
         int count = 0;
         for (int i = 0; i < rows.length(); i++) {
             JSONObject item = rows.optJSONObject(i);
-            if (item != null && matchesSelectedAlarmDate(item)) {
+            if (item != null && matchesAlarmDate(item, date)) {
                 count++;
             }
         }
         return count;
     }
 
-    private void fetchAlarmCount(boolean redrawTabs) {
-        if (token == null) {
+    private void fetchAlarmDateTotalPage(String date, int pageNum, int accumulated, int version) {
+        if (token == null || date == null || date.length() == 0) {
             return;
         }
-        new ApiTask("GET", "/yujing/alarm/list?pageNum=1&pageSize=50", null, true, result -> {
+        new ApiTask("GET", buildAlarmDateEndpoint(date, pageNum, ALARM_PAGE_SIZE), null, true, result -> {
+            if (version != alarmTotalRequestVersion || currentTab != 1 || alarmHistoryAllMode || alarmUnclearedOnly || !date.equals(selectedAlarmDate())) {
+                return;
+            }
             if (!result.ok) {
                 return;
             }
             try {
                 JSONObject json = new JSONObject(result.body);
                 JSONArray rows = json.optJSONArray("rows");
-                historyAlarmTotal = json.optInt("total", rows == null ? 0 : rows.length());
-                if (alarmHistoryAllMode) {
-                    lastAlarmTotal = historyAlarmTotal;
-                }
+                int total = accumulated + countAlarmDate(rows, date);
+                todayAlarmTotal = total;
                 updateAlarmAllChipText();
-                syncActiveAlarmState(rows, true, redrawTabs);
+                if (rows != null && rows.length() >= ALARM_PAGE_SIZE) {
+                    fetchAlarmDateTotalPage(date, pageNum + 1, total, version);
+                }
             } catch (Exception ignored) {
             }
         }).execute();
+    }
+
+    private void fetchAlarmCount(boolean redrawTabs) {
+        if (token == null) {
+            return;
+        }
+        int version = ++alarmCountRequestVersion;
+        fetchAlarmCountPage(1, new JSONArray(), redrawTabs, version);
+    }
+
+    private void fetchAlarmCountPage(int pageNum, JSONArray accumulatedRows, boolean redrawTabs, int version) {
+        new ApiTask("GET", tabEndpoints[1] + "?pageNum=" + pageNum + "&pageSize=" + ALARM_PAGE_SIZE, null, true, result -> {
+            if (version != alarmCountRequestVersion) {
+                return;
+            }
+            if (!result.ok) {
+                return;
+            }
+            try {
+                JSONObject json = new JSONObject(result.body);
+                JSONArray rows = json.optJSONArray("rows");
+                appendRows(accumulatedRows, rows);
+                historyAlarmTotal = json.optInt("total", accumulatedRows.length());
+                if (alarmHistoryAllMode) {
+                    lastAlarmTotal = historyAlarmTotal;
+                }
+                if (rows != null && rows.length() >= ALARM_PAGE_SIZE) {
+                    fetchAlarmCountPage(pageNum + 1, accumulatedRows, redrawTabs, version);
+                    return;
+                }
+                updateAlarmAllChipText();
+                syncActiveAlarmState(accumulatedRows, true, redrawTabs);
+            } catch (Exception ignored) {
+            }
+        }).execute();
+    }
+
+    private void appendRows(JSONArray target, JSONArray source) {
+        if (target == null || source == null) {
+            return;
+        }
+        for (int i = 0; i < source.length(); i++) {
+            Object item = source.opt(i);
+            if (item != null) {
+                target.put(item);
+            }
+        }
     }
 
     private void syncActiveAlarmState(JSONArray rows, boolean allowSound, boolean redrawTabs) {
@@ -1023,6 +1104,7 @@ public class MainActivity extends Activity {
         // 角标按全部未消除告警统计，响铃只统计允许发声的告警，避免离线模具静音开关影响角标显示。
         boolean newAudibleAlarm = soundableCount > oldAudibleCount
                 || (soundableCount >= oldAudibleCount && oldAudibleCount > 0 && latestAudibleKey.length() > 0 && !latestAudibleKey.equals(lastAudibleAlarmKey));
+        boolean alarmMouldOrderChanged = !activeAlarmMouldIds.equals(latestAlarmMouldIds);
         unreadAlarmCount = activeCount;
         audibleAlarmCount = soundableCount;
         activeAlarmMouldIds.clear();
@@ -1031,6 +1113,9 @@ public class MainActivity extends Activity {
         lastAudibleAlarmKey = latestAudibleKey;
         updateLauncherAlarmBadge();
         updateVisibleMouldAlarmBadges();
+        if (alarmMouldOrderChanged && currentTab == 2 && !gatewayManagementMode && content != null) {
+            loadList(false);
+        }
         if (activeCount > 0) {
             if (soundableCount > 0 && allowSound && newAudibleAlarm) {
                 startAlarmSoundLoop();
@@ -1529,11 +1614,15 @@ public class MainActivity extends Activity {
         if (alarmUnclearedOnly) {
             return true;
         }
+        return matchesAlarmDate(item, selectedAlarmDate());
+    }
+
+    private boolean matchesAlarmDate(JSONObject item, String date) {
         String time = firstValue(item, "createTime", "create_time", "alarmTime", "updateTime");
         if (time.length() == 0) {
             return true;
         }
-        return time.startsWith(selectedAlarmDate());
+        return date != null && date.length() > 0 && time.startsWith(date);
     }
 
     private String alarmListTitle() {
@@ -1544,16 +1633,11 @@ public class MainActivity extends Activity {
     }
 
     private String buildListEndpoint() {
-        String pageSize = currentTab == 1 && (alarmUnclearedOnly || alarmHistoryAllMode) ? "1000" : (currentTab == 0 || currentTab == 1 || currentTab == 2 ? "200" : "20");
+        String pageSize = currentTab == 1 ? String.valueOf(ALARM_PAGE_SIZE) : (currentTab == 0 || currentTab == 2 ? "200" : "20");
         String baseEndpoint = currentTab == 2 && gatewayManagementMode ? "/yujing/gateway/list" : tabEndpoints[currentTab];
         String endpoint = baseEndpoint + "?pageNum=1&pageSize=" + pageSize;
         if (currentTab == 1 && !alarmUnclearedOnly && !alarmHistoryAllMode) {
-            try {
-                String date = selectedAlarmDate();
-                endpoint += "&params%5BbeginTime%5D=" + URLEncoder.encode(date + " 00:00:00", "UTF-8");
-                endpoint += "&params%5BendTime%5D=" + URLEncoder.encode(date + " 23:59:59", "UTF-8");
-            } catch (Exception ignored) {
-            }
+            endpoint = buildAlarmDateEndpoint(selectedAlarmDate(), 1, ALARM_PAGE_SIZE);
         }
         String mac = macSearchInput == null ? "" : macSearchInput.getText().toString().trim();
         if (currentTab == 0 && mac.length() > 0) {
@@ -1562,6 +1646,16 @@ public class MainActivity extends Activity {
                 endpoint += "&mac=" + encoded + "&macAddress=" + encoded + "&number=" + encoded;
             } catch (Exception ignored) {
             }
+        }
+        return endpoint;
+    }
+
+    private String buildAlarmDateEndpoint(String date, int pageNum, int pageSize) {
+        String endpoint = tabEndpoints[1] + "?pageNum=" + pageNum + "&pageSize=" + pageSize;
+        try {
+            endpoint += "&params%5BbeginTime%5D=" + URLEncoder.encode(date + " 00:00:00", "UTF-8");
+            endpoint += "&params%5BendTime%5D=" + URLEncoder.encode(date + " 23:59:59", "UTF-8");
+        } catch (Exception ignored) {
         }
         return endpoint;
     }
@@ -1816,6 +1910,46 @@ public class MainActivity extends Activity {
             panel.addView(tip);
         }
         page.addView(panel);
+    }
+
+    private void addFixedMouldGatewaySectionHeader(LinearLayout page) {
+        if (currentTab != 2) {
+            return;
+        }
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(dp(14), dp(4), dp(14), dp(2));
+        row.setBackgroundColor(PAGE_BG);
+
+        TextView bar = new TextView(this);
+        bar.setText("");
+        bar.setBackground(rounded(tabAccent(currentTab), 3));
+        LinearLayout.LayoutParams barParams = new LinearLayout.LayoutParams(dp(4), dp(18));
+        barParams.rightMargin = dp(8);
+        row.addView(bar, barParams);
+
+        TextView title = new TextView(this);
+        title.setText(gatewayManagementMode ? "网关管理" : offlineMouldMode ? "离线模具" : "在线生产模具");
+        title.setTextSize(15);
+        title.setTypeface(null, 1);
+        title.setTextColor(INK);
+        row.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+
+        fixedMouldGatewayCountView = new TextView(this);
+        fixedMouldGatewayCountView.setText("统计中");
+        fixedMouldGatewayCountView.setTextSize(12);
+        fixedMouldGatewayCountView.setTextColor(MUTED);
+        fixedMouldGatewayCountView.setGravity(Gravity.CENTER_VERTICAL | Gravity.RIGHT);
+        fixedMouldGatewayCountView.setSingleLine(true);
+        row.addView(fixedMouldGatewayCountView);
+        page.addView(row);
+    }
+
+    private void updateFixedMouldGatewayCount(String text) {
+        if (fixedMouldGatewayCountView != null) {
+            fixedMouldGatewayCountView.setText(text);
+        }
     }
 
     private TextView addChip(LinearLayout parent, String text, boolean selected) {
@@ -2334,6 +2468,10 @@ public class MainActivity extends Activity {
     }
 
     private void addSectionTitle(String titleText) {
+        addSectionTitle(titleText, "实时刷新");
+    }
+
+    private void addSectionTitle(String titleText, String hintText) {
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setGravity(Gravity.CENTER_VERTICAL);
@@ -2354,7 +2492,7 @@ public class MainActivity extends Activity {
         row.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
 
         TextView hint = new TextView(this);
-        hint.setText("实时刷新");
+        hint.setText(hintText);
         hint.setTextSize(12);
         hint.setTextColor(MUTED);
         row.addView(hint);
@@ -2362,22 +2500,59 @@ public class MainActivity extends Activity {
     }
 
     private void renderGatewayManagement(JSONArray rows) {
-        addSectionTitle("网关管理");
+        updateFixedMouldGatewayCount(gatewayCountText(rows));
         if (rows == null || rows.length() == 0) {
             showEmpty("暂无网关数据");
             return;
         }
-        for (int i = 0; i < rows.length(); i++) {
-            JSONObject gateway = rows.optJSONObject(i);
-            if (gateway != null) {
-                content.addView(gatewayDisplayCard(gateway), topMargin(dp(10)));
-            }
+        List<JSONObject> sortedGateways = sortedGateways(rows);
+        for (JSONObject gateway : sortedGateways) {
+            content.addView(gatewayDisplayCard(gateway), topMargin(dp(10)));
         }
     }
 
-    private void renderPressureMoulds(JSONArray mouldRows) {
+    private List<JSONObject> sortedGateways(JSONArray rows) {
+        List<JSONObject> online = new ArrayList<>();
+        List<JSONObject> offline = new ArrayList<>();
+        if (rows == null) {
+            return online;
+        }
+        for (int i = 0; i < rows.length(); i++) {
+            JSONObject gateway = rows.optJSONObject(i);
+            if (gateway == null) {
+                continue;
+            }
+            if ("在线".equals(gatewayOnlineStatusText(gateway))) {
+                online.add(gateway);
+            } else {
+                offline.add(gateway);
+            }
+        }
+        online.addAll(offline);
+        return online;
+    }
+
+    private String gatewayCountText(JSONArray rows) {
+        int total = rows == null ? 0 : rows.length();
+        int online = 0;
+        if (rows != null) {
+            for (int i = 0; i < rows.length(); i++) {
+                JSONObject gateway = rows.optJSONObject(i);
+                if (gateway != null && "在线".equals(gatewayOnlineStatusText(gateway))) {
+                    online++;
+                }
+            }
+        }
+        return "在线 " + online + " / 离线 " + Math.max(0, total - online);
+    }
+
+    private void renderPressureMoulds(JSONArray mouldRows, int requestVersion) {
         new ApiTask("GET", "/yujing/device/list?pageNum=1&pageSize=1000", null, true, result -> {
+            if (requestVersion != listRequestVersion || currentTab != 2 || gatewayManagementMode) {
+                return;
+            }
             if (!result.ok) {
+                updateFixedMouldGatewayCount("在线 - / 离线 -");
                 showEmpty(result.message);
                 return;
             }
@@ -2395,17 +2570,18 @@ public class MainActivity extends Activity {
                         continue;
                     }
                     String mouldId = mould.optString("id");
+                    String stateMouldId = mouldStateKey(mouldId);
                     boolean busy = isMouldBusyByWebRule(mould);
-                    boolean wasBusy = Boolean.TRUE.equals(mouldBusyById.get(mouldId));
+                    boolean wasBusy = Boolean.TRUE.equals(mouldBusyById.get(stateMouldId));
                     if (busy) {
                         busyMouldIds.put(mouldId, true);
-                        mouldBusyById.put(mouldId, true);
+                        mouldBusyById.put(stateMouldId, true);
                     } else {
                         offlineMouldIds.put(mouldId, true);
                         if (wasBusy) {
-                            activeMouldUntil.put(mouldId, now - 1);
+                            activeMouldUntil.put(stateMouldId, now - 1);
                         }
-                        mouldBusyById.put(mouldId, false);
+                        mouldBusyById.put(stateMouldId, false);
                     }
                 }
                 if (devices != null) {
@@ -2435,12 +2611,24 @@ public class MainActivity extends Activity {
                 }
                 int count = 0;
                 Set<String> latestOfflineAlarmMouldIds = new HashSet<>();
-                addSectionTitle(offlineMouldMode ? "离线模具" : "在线生产模具");
+                int onlineTotal = 0;
+                int offlineTotal = 0;
                 for (int i = 0; i < mouldRows.length(); i++) {
                     JSONObject mould = mouldRows.optJSONObject(i);
                     if (mould == null) {
                         continue;
                     }
+                    String mouldId = mould.optString("id");
+                    if (Boolean.TRUE.equals(busyMouldIds.get(mouldId))) {
+                        onlineTotal++;
+                    } else if (Boolean.TRUE.equals(offlineMouldIds.get(mouldId)) && liveMouldIds.containsKey(mouldId)) {
+                        offlineTotal++;
+                    }
+                }
+                updateFixedMouldGatewayCount("在线 " + onlineTotal + " / 离线 " + offlineTotal);
+                List<JSONObject> displayMoulds = alarmFirstMoulds(mouldRows);
+                for (int i = 0; i < displayMoulds.size(); i++) {
+                    JSONObject mould = displayMoulds.get(i);
                     String mouldId = mould.optString("id");
                     boolean online = Boolean.TRUE.equals(busyMouldIds.get(mouldId));
                     boolean offline = Boolean.TRUE.equals(offlineMouldIds.get(mouldId)) && liveMouldIds.containsKey(mouldId);
@@ -2460,11 +2648,44 @@ public class MainActivity extends Activity {
                 saveOfflineAlarmMouldIds();
                 if (count == 0) {
                     showEmpty(offlineMouldMode ? "暂无离线模具" : "暂无压力动态波动的模具");
+                } else {
+                    refreshHandler.post(this::refreshVisibleMouldPressureValues);
                 }
             } catch (Exception e) {
+                updateFixedMouldGatewayCount("在线 - / 离线 -");
                 showEmpty("模具压力筛选失败");
             }
         }).execute();
+    }
+
+    private List<JSONObject> alarmFirstMoulds(JSONArray mouldRows) {
+        List<JSONObject> list = new ArrayList<>();
+        if (mouldRows == null) {
+            return list;
+        }
+        for (int i = 0; i < mouldRows.length(); i++) {
+            JSONObject mould = mouldRows.optJSONObject(i);
+            if (mould != null) {
+                list.add(mould);
+            }
+        }
+        java.util.Collections.sort(list, (left, right) -> {
+            boolean leftAlarm = mouldHasActiveAlarm(left);
+            boolean rightAlarm = mouldHasActiveAlarm(right);
+            if (leftAlarm == rightAlarm) {
+                return 0;
+            }
+            return leftAlarm ? -1 : 1;
+        });
+        return list;
+    }
+
+    private boolean mouldHasActiveAlarm(JSONObject mould) {
+        if (mould == null) {
+            return false;
+        }
+        String mouldId = mould.optString("id");
+        return mouldId.length() > 0 && activeAlarmMouldIds.contains(mouldId);
     }
 
     private boolean hasLivePressure(JSONObject device) {
@@ -2517,7 +2738,7 @@ public class MainActivity extends Activity {
         if (pressure == null) {
             return false;
         }
-        String key = deviceKey(device);
+        String key = pressureStateKey(device);
         if (key.length() == 0) {
             return false;
         }
@@ -2530,7 +2751,7 @@ public class MainActivity extends Activity {
         if (mouldId == null || mouldId.length() == 0) {
             return false;
         }
-        Long activeUntil = activeMouldUntil.get(mouldId);
+        Long activeUntil = activeMouldUntil.get(mouldStateKey(mouldId));
         return activeUntil != null && activeUntil < now;
     }
 
@@ -2556,8 +2777,9 @@ public class MainActivity extends Activity {
 
     private void updateStaticPressure(JSONObject device, boolean allowOfflineCapture) {
         Double pressure = numberValue(device.optString("pressure"));
-        String key = deviceKey(device);
-        if (pressure == null || key.length() == 0) {
+        String rawKey = deviceKey(device);
+        String key = pressureStateKey(device);
+        if (pressure == null || rawKey.length() == 0 || key.length() == 0) {
             return;
         }
         // 模具在线生产时只记录“见过动态压力”，不采集静止压力，避免动态压力把已锁定值顶掉。
@@ -2576,11 +2798,8 @@ public class MainActivity extends Activity {
             }
             return;
         }
-        if (existingStaticPressure(device) != null && !Boolean.TRUE.equals(dynamicSeenByDevice.get(key))) {
-            staticPressureCapturedByDevice.put(key, true);
-            return;
-        }
         // 下线后压力连续稳定达到阈值时间，才同步为新的静止压力。
+        // 本地已有旧静止压力时也允许离线后重新校准一次，避免换账号或重启 App 后一直显示历史旧值。
         long now = System.currentTimeMillis();
         Double candidate = stableCandidatePressureByDevice.get(key);
         if (candidate == null || Math.abs(pressure - candidate) >= STATIC_PRESSURE_STABLE_DELTA) {
@@ -2594,7 +2813,7 @@ public class MainActivity extends Activity {
             saveStaticPressure(key, pressure);
             staticPressureCapturedByDevice.put(key, true);
             dynamicSeenByDevice.put(key, false);
-            TextView standardView = visibleStandardViews.get(key);
+            TextView standardView = visibleStandardViews.get(rawKey);
             if (standardView != null) {
                 setStaticPressureViewText(standardView, pressureWithUnit(trimNumber(pressure)));
             }
@@ -2615,7 +2834,7 @@ public class MainActivity extends Activity {
     }
 
     private Double existingStaticPressure(JSONObject device) {
-        String key = deviceKey(device);
+        String key = pressureStateKey(device);
         Double value = key.length() == 0 ? null : staticPressureByDevice.get(key);
         if (value != null) {
             return value;
@@ -2647,6 +2866,40 @@ public class MainActivity extends Activity {
 
     private String deviceKey(JSONObject device) {
         return firstValue(device, "id", "number", "mac", "macAddress");
+    }
+
+    private String pressureStateKey(JSONObject device) {
+        String key = deviceKey(device);
+        if (key.length() == 0) {
+            return "";
+        }
+        return accountScopePrefix() + key;
+    }
+
+    private String mouldStateKey(String mouldId) {
+        return accountScopePrefix() + mouldId;
+    }
+
+    private String accountScopePrefix() {
+        String account = currentAccountName();
+        if (account.length() == 0) {
+            account = "default";
+        }
+        return account.replaceAll("[^A-Za-z0-9_@.-]", "_") + "_";
+    }
+
+    private void resetPressureStateCaches() {
+        lastPressureByDevice.clear();
+        stableCandidatePressureByDevice.clear();
+        stableSinceByDevice.clear();
+        staticPressureByDevice.clear();
+        staticPressureCapturedByDevice.clear();
+        dynamicSeenByDevice.clear();
+        activeMouldUntil.clear();
+        mouldBusyById.clear();
+        visiblePressureViews.clear();
+        visibleStandardViews.clear();
+        visibleUpdateViews.clear();
     }
 
     private View cardFor(JSONObject item) {
@@ -2802,20 +3055,22 @@ public class MainActivity extends Activity {
         LinearLayout card = new LinearLayout(this);
         card.setOrientation(LinearLayout.HORIZONTAL);
         card.setGravity(Gravity.CENTER_VERTICAL);
-        card.setPadding(dp(10), dp(8), dp(8), dp(8));
+        card.setPadding(dp(10), dp(11), dp(8), dp(11));
         card.setBackground(roundedStroke(SURFACE, 14, 0xffdfe8f2));
         smoothElevation(card, 3);
 
-        TextView dot = new TextView(this);
         boolean offline = isSensorOffline(item);
-        dot.setText("●");
-        dot.setTextSize(16);
-        dot.setTextColor(offline ? 0xff94a3b8 : GREEN);
-        dot.setGravity(Gravity.CENTER);
-        card.addView(dot, new LinearLayout.LayoutParams(dp(18), dp(38)));
+        ImageView deviceIcon = new ImageView(this);
+        deviceIcon.setImageResource(R.drawable.ic_sensor_device);
+        deviceIcon.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
+        deviceIcon.setAlpha(offline ? 0.48f : 1f);
+        LinearLayout.LayoutParams iconParams = new LinearLayout.LayoutParams(dp(28), dp(52));
+        iconParams.rightMargin = dp(10);
+        card.addView(deviceIcon, iconParams);
 
         LinearLayout copy = new LinearLayout(this);
         copy.setOrientation(LinearLayout.VERTICAL);
+        copy.setGravity(Gravity.CENTER_VERTICAL);
 
         TextView title = new TextView(this);
         String deviceNumber = firstNonEmpty(firstValue(item, "mac", "macAddress", "number"), primaryTitle(item));
@@ -2841,17 +3096,25 @@ public class MainActivity extends Activity {
         sub.setSingleLine(true);
         sub.setEllipsize(TextUtils.TruncateAt.END);
         copy.addView(sub);
+        TextView meta = new TextView(this);
+        meta.setText("电量：" + batteryText(item) + " · 信号：" + clean(firstValue(item, "rssi", "signal", "signalStrength")));
+        meta.setTextSize(10);
+        meta.setTextColor(0xff94a3b8);
+        meta.setPadding(0, dp(3), 0, 0);
+        meta.setSingleLine(true);
+        meta.setEllipsize(TextUtils.TruncateAt.END);
+        copy.addView(meta);
         card.addView(copy, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
 
         TextView status = sensorStatusChip(item);
-        LinearLayout.LayoutParams statusParams = new LinearLayout.LayoutParams(dp(46), dp(24));
+        LinearLayout.LayoutParams statusParams = new LinearLayout.LayoutParams(dp(48), dp(26));
         statusParams.leftMargin = dp(6);
         statusParams.rightMargin = dp(6);
         card.addView(status, statusParams);
 
         LinearLayout pressureBox = new LinearLayout(this);
         pressureBox.setOrientation(LinearLayout.VERTICAL);
-        pressureBox.setGravity(Gravity.RIGHT);
+        pressureBox.setGravity(Gravity.RIGHT | Gravity.CENTER_VERTICAL);
         TextView label = new TextView(this);
         label.setText("实时压力");
         label.setTextSize(10);
@@ -2861,20 +3124,20 @@ public class MainActivity extends Activity {
 
         TextView pressure = new TextView(this);
         pressure.setText(pressureWithUnit(item.optString("pressure")));
-        pressure.setTextSize(12);
+        pressure.setTextSize(13);
         pressure.setTypeface(null, 1);
         pressure.setTextColor(offline ? 0xff94a3b8 : BLUE);
         pressure.setGravity(Gravity.RIGHT);
         pressure.setSingleLine(true);
         pressureBox.addView(pressure, topMargin(dp(2)));
-        card.addView(pressureBox, new LinearLayout.LayoutParams(dp(82), ViewGroup.LayoutParams.WRAP_CONTENT));
+        card.addView(pressureBox, new LinearLayout.LayoutParams(dp(86), ViewGroup.LayoutParams.WRAP_CONTENT));
 
         TextView arrow = new TextView(this);
         arrow.setText("›");
         arrow.setTextSize(24);
         arrow.setTextColor(0xff94a3b8);
         arrow.setGravity(Gravity.CENTER);
-        card.addView(arrow, new LinearLayout.LayoutParams(dp(16), dp(38)));
+        card.addView(arrow, new LinearLayout.LayoutParams(dp(16), dp(48)));
         card.setOnClickListener(v -> showDetail(item));
         return swipeDeleteDeviceRow(item, card);
     }
@@ -2991,9 +3254,9 @@ public class MainActivity extends Activity {
         card.setBackground(roundedStroke(SURFACE, 14, 0xffdfe8f2));
         smoothElevation(card, 2);
 
-        LinearLayout head = new LinearLayout(this);
-        head.setOrientation(LinearLayout.HORIZONTAL);
-        head.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout topRow = new LinearLayout(this);
+        topRow.setOrientation(LinearLayout.HORIZONTAL);
+        topRow.setGravity(Gravity.CENTER_VERTICAL);
 
         boolean active = isActiveAlarm(item);
         ImageView icon = new ImageView(this);
@@ -3003,7 +3266,15 @@ public class MainActivity extends Activity {
         icon.setBackground(rounded(active ? 0xfffff1f2 : 0xffecfdf5, 12));
         LinearLayout.LayoutParams iconParams = new LinearLayout.LayoutParams(dp(30), dp(30));
         iconParams.rightMargin = dp(8);
-        head.addView(icon, iconParams);
+        topRow.addView(icon, iconParams);
+
+        LinearLayout body = new LinearLayout(this);
+        body.setOrientation(LinearLayout.VERTICAL);
+        body.setGravity(Gravity.CENTER_VERTICAL);
+
+        LinearLayout head = new LinearLayout(this);
+        head.setOrientation(LinearLayout.HORIZONTAL);
+        head.setGravity(Gravity.CENTER_VERTICAL);
 
         TextView title = new TextView(this);
         title.setText(alarmTitle(item));
@@ -3021,13 +3292,12 @@ public class MainActivity extends Activity {
         LinearLayout.LayoutParams arrowParams = new LinearLayout.LayoutParams(dp(26), dp(26));
         arrowParams.leftMargin = dp(6);
         head.addView(arrow, arrowParams);
-        card.addView(head);
+        body.addView(head);
 
         LinearLayout detailContainer = new LinearLayout(this);
         detailContainer.setOrientation(LinearLayout.VERTICAL);
         detailContainer.setVisibility(expanded ? View.VISIBLE : View.GONE);
         detailContainer.setLayoutTransition(null);
-        card.addView(detailContainer);
         final boolean[] detailLoaded = {expanded};
         final TextView[] summaryView = {null};
         if (expanded) {
@@ -3037,10 +3307,13 @@ public class MainActivity extends Activity {
             summary.setText(alarmSummary(item));
             summary.setTextSize(11);
             summary.setTextColor(MUTED);
-            summary.setPadding(dp(38), dp(2), 0, 0);
+            summary.setPadding(0, dp(2), 0, 0);
             summaryView[0] = summary;
-            card.addView(summary);
+            body.addView(summary);
         }
+        topRow.addView(body, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        card.addView(topRow);
+        card.addView(detailContainer);
 
         card.setOnClickListener(v -> {
             boolean nextExpanded = detailContainer.getVisibility() != View.VISIBLE;
@@ -3109,12 +3382,16 @@ public class MainActivity extends Activity {
                 ViewGroup.LayoutParams.WRAP_CONTENT
         ));
 
-        delete.setOnClickListener(v -> deleteAlarm(item));
+        delete.setOnClickListener(v -> deleteAlarm(item, row));
         attachDeviceSwipe(card);
         return row;
     }
 
     private void deleteAlarm(JSONObject item) {
+        deleteAlarm(item, null);
+    }
+
+    private void deleteAlarm(JSONObject item, View rowView) {
         String id = firstValue(item, "id", "alarmId", "warnId", "recordId");
         if (id.length() == 0) {
             toast("缺少告警ID，无法删除");
@@ -3137,15 +3414,21 @@ public class MainActivity extends Activity {
                 int code = json.optInt("code", 200);
                 toast(code == 200 ? "告警已删除" : json.optString("msg", "删除失败"));
                 if (code == 200) {
-                    loadList(false);
-                    fetchAlarmCount(true);
+                    refreshAfterAlarmDeleted(rowView);
                 }
             } catch (Exception e) {
                 toast("告警已删除");
-                loadList(false);
-                fetchAlarmCount(true);
+                refreshAfterAlarmDeleted(rowView);
             }
         }).execute();
+    }
+
+    private void refreshAfterAlarmDeleted(View rowView) {
+        if (rowView != null && rowView.getParent() instanceof ViewGroup) {
+            ((ViewGroup) rowView.getParent()).removeView(rowView);
+        }
+        loadList(false);
+        fetchAlarmCount(true);
     }
 
     private String alarmSummary(JSONObject item) {
@@ -3158,26 +3441,32 @@ public class MainActivity extends Activity {
     }
 
     private View gatewayDisplayCard(JSONObject item) {
-        String id = firstNonEmpty(item.optString("id"), primaryTitle(item));
-        boolean expanded = expandedGatewayIds.contains(id);
         LinearLayout card = new LinearLayout(this);
         card.setOrientation(LinearLayout.VERTICAL);
-        card.setPadding(dp(12), dp(10), dp(12), expanded ? dp(12) : dp(10));
+        card.setPadding(dp(10), dp(10), dp(10), dp(10));
         card.setBackground(roundedStroke(SURFACE, 16, 0xffdbe7f4));
         smoothElevation(card, 2);
+
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+
+        ImageView icon = new ImageView(this);
+        icon.setImageResource(R.drawable.ic_gateway_router);
+        icon.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
+        icon.setPadding(0, 0, 0, 0);
+        LinearLayout.LayoutParams iconParams = new LinearLayout.LayoutParams(dp(54), dp(54));
+        iconParams.gravity = Gravity.CENTER_VERTICAL;
+        iconParams.rightMargin = dp(10);
+        row.addView(icon, iconParams);
+
+        LinearLayout body = new LinearLayout(this);
+        body.setOrientation(LinearLayout.VERTICAL);
+        body.setGravity(Gravity.CENTER_VERTICAL);
 
         LinearLayout head = new LinearLayout(this);
         head.setOrientation(LinearLayout.HORIZONTAL);
         head.setGravity(Gravity.CENTER_VERTICAL);
-
-        ImageView icon = new ImageView(this);
-        icon.setImageResource(R.drawable.ic_gateway);
-        icon.setColorFilter(CYAN);
-        icon.setPadding(dp(7), dp(7), dp(7), dp(7));
-        icon.setBackground(rounded(0xffe8faff, 11));
-        LinearLayout.LayoutParams iconParams = new LinearLayout.LayoutParams(dp(36), dp(36));
-        iconParams.rightMargin = dp(10);
-        head.addView(icon, iconParams);
 
         LinearLayout copy = new LinearLayout(this);
         copy.setOrientation(LinearLayout.VERTICAL);
@@ -3189,72 +3478,69 @@ public class MainActivity extends Activity {
         title.setSingleLine(true);
         title.setEllipsize(TextUtils.TruncateAt.END);
         copy.addView(title);
-
-        TextView subtitle = new TextView(this);
-        subtitle.setText(clean(firstValue(item, "name", "remark")));
-        subtitle.setTextSize(11);
-        subtitle.setTextColor(MUTED);
-        subtitle.setPadding(0, dp(2), 0, 0);
-        subtitle.setSingleLine(true);
-        subtitle.setEllipsize(TextUtils.TruncateAt.END);
-        copy.addView(subtitle);
         head.addView(copy, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
 
         TextView badge = gatewayStatusChip(item);
         head.addView(badge);
-        TextView arrow = foldArrow(expanded);
-        LinearLayout.LayoutParams arrowParams = new LinearLayout.LayoutParams(dp(24), dp(24));
-        arrowParams.leftMargin = dp(8);
-        head.addView(arrow, arrowParams);
-        card.addView(head);
+        body.addView(head);
 
-        LinearLayout summary = new LinearLayout(this);
-        summary.setOrientation(LinearLayout.HORIZONTAL);
-        summary.setPadding(dp(46), dp(8), 0, 0);
-        addGatewaySummaryItem(summary, "组织", gatewayDeptName(item));
-        addGatewaySummaryItem(summary, "更新", compactTime(item.optString("updateTime")));
-        card.addView(summary);
+        LinearLayout info = new LinearLayout(this);
+        info.setOrientation(LinearLayout.VERTICAL);
+        info.setPadding(0, dp(4), 0, 0);
+        addGatewayLine(info, "名称：", clean(firstValue(item, "name", "remark")));
+        addGatewayLine(info, "组织：", gatewayDeptName(item));
+        addGatewayLine(info, "当前产线：", gatewayMouldName(item), false);
+        addGatewayLine(info, "更新时间：", clean(item.optString("updateTime")));
+        body.addView(info);
 
-        if (expanded) {
-            LinearLayout info = infoPanel();
-            String[] keys = {"number", "name", "status", "remark", "createTime", "updateTime"};
-            for (String key : keys) {
-                if (item.has(key) && !item.isNull(key)) {
-                    String value = item.optString(key);
-                    if ("status".equals(key)) {
-                        value = gatewayOnlineStatusText(item);
-                    }
-                    addInfoItem(info, labelFor(key), value);
-                }
-            }
-            JSONObject dept = item.optJSONObject("dept");
-            if (dept != null) {
-                addInfoItem(info, "组织", dept.optString("deptName"));
-            }
-            if (info.getChildCount() > 0) {
-                card.addView(info, topMargin(dp(10)));
-            }
-            LinearLayout actions = new LinearLayout(this);
-            actions.setOrientation(LinearLayout.HORIZONTAL);
-            TextView changeMould = compactAction("更换模具");
-            changeMould.setOnClickListener(v -> showGatewayMouldDialog(item));
-            actions.addView(changeMould, new LinearLayout.LayoutParams(0, dp(34), 1));
-            TextView detail = compactAction("网关信息修改");
-            detail.setOnClickListener(v -> showGatewayInfoEdit(item));
-            LinearLayout.LayoutParams detailParams = new LinearLayout.LayoutParams(0, dp(34), 1);
-            detailParams.leftMargin = dp(8);
-            actions.addView(detail, detailParams);
-            card.addView(actions, fixedTop(ViewGroup.LayoutParams.MATCH_PARENT, dp(34), dp(10)));
-        }
-        card.setOnClickListener(v -> {
-            if (expandedGatewayIds.contains(id)) {
-                expandedGatewayIds.remove(id);
-            } else {
-                expandedGatewayIds.add(id);
-            }
-            loadList(false);
-        });
+        LinearLayout actions = new LinearLayout(this);
+        actions.setOrientation(LinearLayout.HORIZONTAL);
+        actions.setGravity(Gravity.CENTER);
+        TextView changeMould = gatewayActionButton("↔  更换模具");
+        changeMould.setOnClickListener(v -> showGatewayMouldDialog(item));
+        actions.addView(changeMould, new LinearLayout.LayoutParams(0, dp(32), 1));
+        TextView detail = gatewayActionButton("✎  网关信息修改");
+        detail.setOnClickListener(v -> showGatewayInfoEdit(item));
+        LinearLayout.LayoutParams detailParams = new LinearLayout.LayoutParams(0, dp(32), 1);
+        detailParams.leftMargin = dp(8);
+        actions.addView(detail, detailParams);
+
+        row.addView(body, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        card.addView(row);
+        card.addView(actions, fixedTop(ViewGroup.LayoutParams.MATCH_PARENT, dp(32), dp(8)));
         return card;
+    }
+
+    private void addGatewayLine(LinearLayout parent, String label, String value) {
+        addGatewayLine(parent, label, value, true);
+    }
+
+    private void addGatewayLine(LinearLayout parent, String label, String value, boolean singleLine) {
+        TextView line = new TextView(this);
+        line.setText(label + clean(value));
+        line.setTextSize(12);
+        line.setTextColor(0xff475569);
+        if (singleLine) {
+            line.setSingleLine(true);
+            line.setEllipsize(TextUtils.TruncateAt.END);
+        } else {
+            line.setSingleLine(false);
+            line.setMaxLines(2);
+            line.setEllipsize(null);
+            line.setLineSpacing(dp(1), 1f);
+        }
+        parent.addView(line, topMargin(dp(1)));
+    }
+
+    private TextView gatewayActionButton(String text) {
+        TextView button = new TextView(this);
+        button.setText(text);
+        button.setTextSize(13);
+        button.setTypeface(null, 1);
+        button.setTextColor(BLUE);
+        button.setGravity(Gravity.CENTER);
+        button.setBackground(roundedStroke(0xfff8fbff, 6, 0xff93c5fd));
+        return button;
     }
 
     private TextView gatewayStatusChip(JSONObject item) {
@@ -3288,17 +3574,17 @@ public class MainActivity extends Activity {
         item.setOrientation(LinearLayout.VERTICAL);
         TextView labelView = new TextView(this);
         labelView.setText(label);
-        labelView.setTextSize(10);
+        labelView.setTextSize(9);
         labelView.setTextColor(0xff94a3b8);
         item.addView(labelView);
         TextView valueView = new TextView(this);
         valueView.setText(clean(value));
-        valueView.setTextSize(12);
+        valueView.setTextSize(11);
         valueView.setTextColor(INK);
         valueView.setTypeface(null, 1);
         valueView.setSingleLine(true);
         valueView.setEllipsize(TextUtils.TruncateAt.END);
-        item.addView(valueView, topMargin(dp(2)));
+        item.addView(valueView, topMargin(dp(1)));
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
         params.rightMargin = dp(8);
         row.addView(item, params);
@@ -3310,6 +3596,17 @@ public class MainActivity extends Activity {
             return firstNonEmpty(dept.optString("deptName"), "-");
         }
         return clean(firstValue(item, "deptName", "dept"));
+    }
+
+    private String gatewayMouldName(JSONObject item) {
+        JSONObject mould = item.optJSONObject("mould");
+        if (mould != null) {
+            String name = firstValue(mould, "name", "mouldName");
+            String number = firstValue(mould, "number", "mouldNumber");
+            String title = (number + " " + name).trim();
+            return clean(firstNonEmpty(title, firstNonEmpty(name, number)));
+        }
+        return clean(firstValue(item, "mouldName", "mould_name", "mouldNumber", "mould_number"));
     }
 
     private String compactTime(String value) {
@@ -3467,9 +3764,9 @@ public class MainActivity extends Activity {
 
     private void applyMouldAlarmIcon(ImageView icon, String mouldId) {
         boolean alarm = mouldId != null && activeAlarmMouldIds.contains(mouldId);
-        icon.setImageResource(alarm ? R.drawable.ic_alarm : R.drawable.ic_mould);
-        icon.setColorFilter(alarm ? RED : BLUE);
-        icon.setBackground(rounded(alarm ? 0xfffff1f2 : 0xffeef5ff, 11));
+        icon.setImageResource(R.drawable.ic_alarm);
+        icon.setColorFilter(alarm ? RED : GREEN);
+        icon.setBackground(rounded(alarm ? 0xfffff1f2 : 0xffecfdf5, 11));
     }
 
     private void updateVisibleMouldAlarmBadges() {

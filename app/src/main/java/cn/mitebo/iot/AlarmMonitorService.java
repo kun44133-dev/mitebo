@@ -19,6 +19,7 @@ import android.os.Vibrator;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
+import org.json.JSONTokener;
 
 import java.io.BufferedReader;
 import java.io.InputStream;
@@ -42,6 +43,7 @@ public class AlarmMonitorService extends Service {
     private static final String MONITOR_CHANNEL_ID = "alarm_monitor";
     private static final int ALARM_NOTIFICATION_ID = 1024;
     private static final int MONITOR_NOTIFICATION_ID = 1025;
+    private static final int ALARM_PAGE_SIZE = 1000;
     private static final long POLL_MS = 5000;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
@@ -127,23 +129,10 @@ public class AlarmMonitorService extends Service {
             int audible = audibleAlarmCount;
             boolean ok = false;
             try {
-                HttpURLConnection connection = (HttpURLConnection) new URL(BASE_URL + "/yujing/alarm/list?pageNum=1&pageSize=50").openConnection();
-                connection.setRequestMethod("GET");
-                connection.setConnectTimeout(12000);
-                connection.setReadTimeout(12000);
-                connection.setRequestProperty("Accept", "application/json");
-                connection.setRequestProperty("Authorization", "Bearer " + token);
-                int code = connection.getResponseCode();
-                InputStream stream = code >= 200 && code < 400 ? connection.getInputStream() : connection.getErrorStream();
-                String body = readAll(stream);
-                if (code >= 200 && code < 400) {
-                    JSONObject json = new JSONObject(body);
-                    JSONArray rows = json.optJSONArray("rows");
-                    count = countActiveAlarms(rows);
-                    audible = countAudibleAlarms(rows);
-                    ok = true;
-                }
-                connection.disconnect();
+                JSONArray rows = fetchAlarmRows(token);
+                count = countActiveAlarms(rows);
+                audible = countAudibleAlarms(rows);
+                ok = true;
             } catch (Exception ignored) {
             }
             int finalCount = count;
@@ -157,6 +146,51 @@ public class AlarmMonitorService extends Service {
                 }
             });
         }).start();
+    }
+
+    private JSONArray fetchAlarmRows(String token) throws Exception {
+        JSONArray allRows = new JSONArray();
+        int pageNum = 1;
+        while (true) {
+            HttpURLConnection connection = null;
+            try {
+                connection = (HttpURLConnection) new URL(BASE_URL + "/yujing/alarm/list?pageNum=" + pageNum + "&pageSize=" + ALARM_PAGE_SIZE).openConnection();
+                connection.setRequestMethod("GET");
+                connection.setConnectTimeout(12000);
+                connection.setReadTimeout(12000);
+                connection.setRequestProperty("Accept", "application/json");
+                connection.setRequestProperty("Authorization", "Bearer " + token);
+                int code = connection.getResponseCode();
+                InputStream stream = code >= 200 && code < 400 ? connection.getInputStream() : connection.getErrorStream();
+                String body = readAll(stream);
+                if (code < 200 || code >= 400) {
+                    throw new Exception("alarm request failed");
+                }
+                JSONObject json = new JSONObject(body);
+                JSONArray rows = json.optJSONArray("rows");
+                appendRows(allRows, rows);
+                if (rows == null || rows.length() < ALARM_PAGE_SIZE) {
+                    return allRows;
+                }
+                pageNum++;
+            } finally {
+                if (connection != null) {
+                    connection.disconnect();
+                }
+            }
+        }
+    }
+
+    private void appendRows(JSONArray target, JSONArray source) {
+        if (target == null || source == null) {
+            return;
+        }
+        for (int i = 0; i < source.length(); i++) {
+            Object item = source.opt(i);
+            if (item != null) {
+                target.put(item);
+            }
+        }
     }
 
     private boolean isAppExpired() {
@@ -224,12 +258,66 @@ public class AlarmMonitorService extends Service {
                 || text.contains("offline")) {
             return true;
         }
+        String mouldId = alarmMouldId(alarm);
+        return mouldId.length() > 0 && isKnownOfflineMould(mouldId);
+    }
+
+    private String alarmMouldId(JSONObject alarm) {
+        if (alarm == null) {
+            return "";
+        }
         String mouldId = firstValue(alarm, "mouldId", "mould_id");
         JSONObject mould = alarm.optJSONObject("mould");
         if (mouldId.length() == 0 && mould != null) {
             mouldId = mould.optString("id");
         }
-        return mouldId.length() > 0 && isKnownOfflineMould(mouldId);
+        JSONArray details = alarmDetails(alarm);
+        if (mouldId.length() == 0 && details != null) {
+            for (int i = 0; i < details.length(); i++) {
+                JSONObject detail = details.optJSONObject(i);
+                if (detail == null) {
+                    continue;
+                }
+                mouldId = firstValue(detail, "mouldId", "mould_id");
+                JSONObject detailMould = detail.optJSONObject("mould");
+                if (mouldId.length() == 0 && detailMould != null) {
+                    mouldId = detailMould.optString("id");
+                }
+                if (mouldId.length() > 0) {
+                    break;
+                }
+            }
+        }
+        return mouldId;
+    }
+
+    private JSONArray alarmDetails(JSONObject alarm) {
+        Object value = alarm == null ? null : alarm.opt("detail");
+        if (value instanceof JSONArray) {
+            return (JSONArray) value;
+        }
+        if (value instanceof JSONObject) {
+            JSONArray array = new JSONArray();
+            array.put(value);
+            return array;
+        }
+        String text = alarm == null ? "" : alarm.optString("detail");
+        if (text.length() == 0 || "null".equals(text)) {
+            return null;
+        }
+        try {
+            Object parsed = new JSONTokener(text).nextValue();
+            if (parsed instanceof JSONArray) {
+                return (JSONArray) parsed;
+            }
+            if (parsed instanceof JSONObject) {
+                JSONArray array = new JSONArray();
+                array.put(parsed);
+                return array;
+            }
+        } catch (Exception ignored) {
+        }
+        return null;
     }
 
     private boolean isKnownOfflineMould(String mouldId) {
