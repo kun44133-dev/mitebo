@@ -43,7 +43,8 @@ public class AlarmMonitorService extends Service {
     private static final String MONITOR_CHANNEL_ID = "alarm_monitor";
     private static final int ALARM_NOTIFICATION_ID = 1024;
     private static final int MONITOR_NOTIFICATION_ID = 1025;
-    private static final int ALARM_PAGE_SIZE = 1000;
+    private static final int ALARM_PAGE_SIZE = 100;
+    private static final int MAX_ALARM_PAGE_COUNT = 1;
     private static final long POLL_MS = 5000;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
@@ -94,7 +95,15 @@ public class AlarmMonitorService extends Service {
             stopSelf();
             return START_NOT_STICKY;
         }
-        startForeground(MONITOR_NOTIFICATION_ID, monitorNotification());
+        try {
+            startForeground(MONITOR_NOTIFICATION_ID, monitorNotification());
+        } catch (SecurityException ignored) {
+            stopSelf();
+            return START_NOT_STICKY;
+        } catch (RuntimeException ignored) {
+            stopSelf();
+            return START_NOT_STICKY;
+        }
         if (!polling) {
             polling = true;
             pollAlarmState();
@@ -169,7 +178,7 @@ public class AlarmMonitorService extends Service {
                 JSONObject json = new JSONObject(body);
                 JSONArray rows = json.optJSONArray("rows");
                 appendRows(allRows, rows);
-                if (rows == null || rows.length() < ALARM_PAGE_SIZE) {
+                if (rows == null || rows.length() < ALARM_PAGE_SIZE || pageNum >= MAX_ALARM_PAGE_COUNT) {
                     return allRows;
                 }
                 pageNum++;
@@ -350,7 +359,11 @@ public class AlarmMonitorService extends Service {
         }
         NotificationManager manager = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
         if (manager != null) {
-            manager.notify(MONITOR_NOTIFICATION_ID, monitorNotification());
+            try {
+                manager.notify(MONITOR_NOTIFICATION_ID, monitorNotification());
+            } catch (SecurityException ignored) {
+            } catch (RuntimeException ignored) {
+            }
         }
     }
 
@@ -423,7 +436,7 @@ public class AlarmMonitorService extends Service {
 
     private void showAlarmNotification(int count) {
         NotificationManager manager = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
-        if (manager == null) {
+        if (manager == null || !canPostNotifications()) {
             return;
         }
         Intent intent = new Intent(this, MainActivity.class);
@@ -448,7 +461,11 @@ public class AlarmMonitorService extends Service {
         if (Build.VERSION.SDK_INT >= 26) {
             builder.setBadgeIconType(Notification.BADGE_ICON_SMALL);
         }
-        manager.notify(ALARM_NOTIFICATION_ID, builder.build());
+        try {
+            manager.notify(ALARM_NOTIFICATION_ID, builder.build());
+        } catch (SecurityException ignored) {
+        } catch (RuntimeException ignored) {
+        }
     }
 
     private void clearAlarmNotification() {
@@ -490,6 +507,11 @@ public class AlarmMonitorService extends Service {
 
     private boolean backgroundAlarmMonitorEnabled() {
         return prefs().getBoolean(PREF_BACKGROUND_ALARM_MONITOR, false);
+    }
+
+    private boolean canPostNotifications() {
+        return Build.VERSION.SDK_INT < 33
+                || checkSelfPermission("android.permission.POST_NOTIFICATIONS") == android.content.pm.PackageManager.PERMISSION_GRANTED;
     }
 
     private String token() {

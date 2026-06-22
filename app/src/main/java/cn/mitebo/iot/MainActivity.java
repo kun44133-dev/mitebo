@@ -102,7 +102,9 @@ public class MainActivity extends Activity {
     private static final long DEFAULT_REFRESH_MS = 15000;
     private static final long ALARM_REFRESH_MS = 5000;
     private static final long MOULD_REFRESH_MS = 5000;
-    private static final int ALARM_PAGE_SIZE = 1000;
+    private static final int ALARM_PAGE_SIZE = 100;
+    private static final int MAX_ALARM_PAGE_COUNT = 1;
+    private static final int MAX_ALARM_DATE_SCAN_PAGES = 300;
     private static final int BOTTOM_NAV_HEIGHT_DP = 58;
     private static final int MOULD_TOGGLE_HEIGHT_DP = 40;
     private static final int MOULD_TOGGLE_NAV_GAP_DP = -3;
@@ -133,6 +135,8 @@ public class MainActivity extends Activity {
     private int audibleAlarmCount = 0;
     private int lastAlarmTotal = -1;
     private int todayAlarmTotal = -1;
+    private boolean todayAlarmTotalHasMore = false;
+    private String alarmTotalDateKey = "";
     private int historyAlarmTotal = -1;
     private int alarmTotalRequestVersion = 0;
     private String lastSeenAlarmKey = "";
@@ -171,6 +175,8 @@ public class MainActivity extends Activity {
     private final Map<String, ImageView> visibleMouldAlarmIcons = new HashMap<>();
     private final Map<String, JSONArray> mouldDropdownDeviceCache = new HashMap<>();
     private TextView fixedMouldGatewayCountView;
+    private TextView fixedAlarmTitleView;
+    private TextView fixedAlarmHintView;
     private int listRequestVersion = 0;
     private int loadingListRequestVersion = 0;
     private int alarmCountRequestVersion = 0;
@@ -462,12 +468,36 @@ public class MainActivity extends Activity {
         LinearLayout.LayoutParams pickerParams = new LinearLayout.LayoutParams(dp(44), dp(50));
         accountRow.addView(accountPicker, pickerParams);
         panel.addView(accountRow, fixedTop(ViewGroup.LayoutParams.MATCH_PARENT, dp(50), dp(18)));
+        LinearLayout passwordRow = new LinearLayout(this);
+        passwordRow.setOrientation(LinearLayout.HORIZONTAL);
+        passwordRow.setGravity(Gravity.CENTER_VERTICAL);
+        passwordRow.setPadding(0, 0, dp(4), 0);
+        passwordRow.setBackground(roundedStroke(0xfffbfdff, 14, LINE));
         passwordInput = input("密码", true);
+        passwordInput.setBackground(rounded(0x00ffffff, 0));
         boolean remembered = getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean("remember_password", false);
         if (remembered) {
             passwordInput.setText(savedPasswordFor(latestSavedUsername()));
         }
-        panel.addView(passwordInput, fixedTop(ViewGroup.LayoutParams.MATCH_PARENT, dp(50), dp(12)));
+        passwordRow.addView(passwordInput, new LinearLayout.LayoutParams(0, dp(50), 1));
+        View passwordDivider = new View(this);
+        passwordDivider.setBackgroundColor(0xffdbe3ef);
+        passwordRow.addView(passwordDivider, new LinearLayout.LayoutParams(dp(1), dp(26)));
+        TextView passwordToggle = new TextView(this);
+        final boolean[] passwordVisible = {false};
+        passwordToggle.setText("显");
+        passwordToggle.setTextSize(14);
+        passwordToggle.setTypeface(null, 1);
+        passwordToggle.setTextColor(0xff64748b);
+        passwordToggle.setGravity(Gravity.CENTER);
+        passwordToggle.setBackground(rounded(0x00ffffff, 0));
+        passwordToggle.setOnClickListener(v -> {
+            passwordVisible[0] = !passwordVisible[0];
+            setPasswordVisible(passwordInput, passwordVisible[0]);
+            passwordToggle.setText(passwordVisible[0] ? "隐" : "显");
+        });
+        passwordRow.addView(passwordToggle, new LinearLayout.LayoutParams(dp(44), dp(50)));
+        panel.addView(passwordRow, fixedTop(ViewGroup.LayoutParams.MATCH_PARENT, dp(50), dp(12)));
 
         LinearLayout captchaRow = new LinearLayout(this);
         captchaRow.setOrientation(LinearLayout.HORIZONTAL);
@@ -502,7 +532,7 @@ public class MainActivity extends Activity {
         panel.addView(tip, topMargin(dp(14)));
 
         TextView version = new TextView(this);
-        version.setText("作者 kunkun  版本号 1.0.9");
+        version.setText("作者 kunkun  版本号 1.0.20");
         version.setTextSize(13);
         version.setTextColor(0xffb7c9d9);
         version.setGravity(Gravity.CENTER);
@@ -526,6 +556,17 @@ public class MainActivity extends Activity {
             input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
         }
         return input;
+    }
+
+    private void setPasswordVisible(EditText input, boolean visible) {
+        if (input == null) {
+            return;
+        }
+        int selection = Math.max(0, input.getSelectionStart());
+        input.setInputType(InputType.TYPE_CLASS_TEXT
+                | (visible ? InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD : InputType.TYPE_TEXT_VARIATION_PASSWORD));
+        int length = input.getText() == null ? 0 : input.getText().length();
+        input.setSelection(Math.min(selection, length));
     }
 
     private List<OptionItem> savedAccountOptions() {
@@ -743,6 +784,8 @@ public class MainActivity extends Activity {
         root.removeAllViews();
         loading.setVisibility(View.GONE);
         fixedMouldGatewayCountView = null;
+        fixedAlarmTitleView = null;
+        fixedAlarmHintView = null;
         LinearLayout page = new LinearLayout(this);
         page.setOrientation(LinearLayout.VERTICAL);
         page.setBackgroundColor(PAGE_BG);
@@ -750,6 +793,7 @@ public class MainActivity extends Activity {
         applyHomeInsets(page);
 
         addContextPanel(page);
+        addFixedAlarmSectionHeader(page);
         addFixedMouldGatewaySectionHeader(page);
 
         ScrollView scroll = new ScrollView(this);
@@ -894,6 +938,7 @@ public class MainActivity extends Activity {
             }
             clearVisibleMouldValueViews();
             content.removeAllViews();
+            updateFixedAlarmSectionHeader();
             if (!result.ok) {
                 showEmpty(result.message);
                 return;
@@ -916,15 +961,19 @@ public class MainActivity extends Activity {
                     } else if (!alarmUnclearedOnly) {
                         String date = selectedAlarmDate();
                         int totalVersion = ++alarmTotalRequestVersion;
-                        todayAlarmTotal = countAlarmDate(rows, date);
+                        updateTodayAlarmTotal(date, countSelectedDateAlarms(rows), false);
                         if (rows != null && rows.length() >= ALARM_PAGE_SIZE) {
-                            fetchAlarmDateTotalPage(date, 2, todayAlarmTotal, totalVersion);
+                            fetchAlarmDateTotalPage(date, 1, 0, totalVersion);
                         }
                     }
                     updateAlarmAllChipText();
                     syncActiveAlarmState(rows, false, true);
                 }
                 if (rows == null || rows.length() == 0) {
+                    if (isAlarmDateMode()) {
+                        scanAlarmDateRows(selectedAlarmDate(), requestVersion);
+                        return;
+                    }
                     showEmpty("暂无数据");
                     return;
                 }
@@ -936,9 +985,19 @@ public class MainActivity extends Activity {
                     renderPressureMoulds(rows, requestVersion);
                     return;
                 }
-                addSectionTitle(currentTab == 1 ? alarmListTitle() : tabTitles[currentTab] + "列表");
+                if (currentTab != 1) {
+                    addSectionTitle(tabTitles[currentTab] + "列表");
+                }
                 int added = renderListRows(rows);
+                if (isAlarmDateMode() && (added == 0 || renderedAlarmRowsAllActive(rows))) {
+                    scanAlarmDateRows(selectedAlarmDate(), requestVersion, rows);
+                    return;
+                }
                 if (added == 0) {
+                    if (isAlarmDateMode()) {
+                        scanAlarmDateRows(selectedAlarmDate(), requestVersion, rows);
+                        return;
+                    }
                     showEmpty(currentTab == 0 ? "未找到匹配的设备" : currentTab == 1 ? alarmListTitle() + " 暂无告警" : "暂无数据");
                 }
             } catch (Exception e) {
@@ -999,11 +1058,131 @@ public class MainActivity extends Activity {
         return count;
     }
 
+    private void updateTodayAlarmTotal(String date, int count, boolean allowDecrease) {
+        updateTodayAlarmTotal(date, count, allowDecrease, false);
+    }
+
+    private void updateTodayAlarmTotal(String date, int count, boolean allowDecrease, boolean hasMore) {
+        if (date == null) {
+            date = "";
+        }
+        if (!date.equals(alarmTotalDateKey)) {
+            alarmTotalDateKey = date;
+            todayAlarmTotal = Math.max(0, count);
+            todayAlarmTotalHasMore = hasMore;
+            updateAlarmAllChipText();
+            return;
+        }
+        if (allowDecrease
+                || count > todayAlarmTotal
+                || (count == todayAlarmTotal && hasMore != todayAlarmTotalHasMore)
+                || (hasMore && count >= todayAlarmTotal)) {
+            todayAlarmTotal = Math.max(0, count);
+            todayAlarmTotalHasMore = hasMore;
+            updateAlarmAllChipText();
+        }
+    }
+
+    private boolean renderedAlarmRowsAllActive(JSONArray rows) {
+        if (currentTab != 1 || rows == null || rows.length() == 0) {
+            return false;
+        }
+        int matched = 0;
+        for (int i = 0; i < rows.length(); i++) {
+            JSONObject item = rows.optJSONObject(i);
+            if (item == null || !matchesDeviceQuery(item) || !matchesSelectedAlarmDate(item) || !matchesAlarmFilter(item)) {
+                continue;
+            }
+            matched++;
+            if (!isActiveAlarm(item)) {
+                return false;
+            }
+        }
+        return matched > 0;
+    }
+
+    private void scanAlarmDateRows(String date, int requestVersion) {
+        scanAlarmDateRows(date, requestVersion, null);
+    }
+
+    private void scanAlarmDateRows(String date, int requestVersion, JSONArray fallbackRows) {
+        scanAlarmDateRows(date, requestVersion, fallbackRows, 1, new JSONArray(), 0);
+    }
+
+    private void scanAlarmDateRows(String date, int requestVersion, JSONArray fallbackRows, int pageNum, JSONArray matchedRows, int matchedCount) {
+        if (token == null || date == null || date.length() == 0 || requestVersion != listRequestVersion || !isAlarmDateMode()) {
+            return;
+        }
+        String endpoint = tabEndpoints[1] + "?pageNum=" + pageNum + "&pageSize=" + ALARM_PAGE_SIZE;
+        new ApiTask("GET", endpoint, null, true, result -> {
+            if (requestVersion != listRequestVersion || !isAlarmDateMode() || !date.equals(selectedAlarmDate())) {
+                return;
+            }
+            if (!result.ok) {
+                showEmpty(result.message);
+                return;
+            }
+            try {
+                JSONObject json = new JSONObject(result.body);
+                JSONArray rows = json.optJSONArray("rows");
+                int nextCount = matchedCount;
+                boolean sawOlder = false;
+                if (rows != null) {
+                    for (int i = 0; i < rows.length(); i++) {
+                        JSONObject item = rows.optJSONObject(i);
+                        if (item == null) {
+                            continue;
+                        }
+                        int compare = compareAlarmDate(item, date);
+                        if (compare == 0) {
+                            nextCount++;
+                            if (matchedRows.length() < ALARM_PAGE_SIZE) {
+                                matchedRows.put(item);
+                            }
+                        } else if (compare < 0) {
+                            sawOlder = true;
+                        }
+                    }
+                }
+                boolean reachedEnd = rows == null
+                        || rows.length() < ALARM_PAGE_SIZE
+                        || pageNum >= MAX_ALARM_DATE_SCAN_PAGES
+                        || sawOlder;
+                boolean reachedLimit = rows != null
+                        && rows.length() >= ALARM_PAGE_SIZE
+                        && pageNum >= MAX_ALARM_DATE_SCAN_PAGES
+                        && !sawOlder;
+                if (nextCount > 0 || reachedEnd) {
+                    updateTodayAlarmTotal(date, nextCount, reachedEnd && nextCount == 0, reachedLimit);
+                }
+                if (rows != null
+                        && rows.length() >= ALARM_PAGE_SIZE
+                        && pageNum < MAX_ALARM_DATE_SCAN_PAGES
+                        && !sawOlder) {
+                    scanAlarmDateRows(date, requestVersion, fallbackRows, pageNum + 1, matchedRows, nextCount);
+                    return;
+                }
+                content.removeAllViews();
+                int added = renderListRows(matchedRows);
+                if (added == 0 && fallbackRows != null && fallbackRows.length() > 0) {
+                    added = renderListRows(fallbackRows);
+                    updateTodayAlarmTotal(date, added, false);
+                }
+                if (added == 0) {
+                    showEmpty(alarmListTitle() + " 暂无告警");
+                }
+            } catch (Exception e) {
+                showEmpty("数据解析失败");
+            }
+        }).execute();
+    }
+
     private void fetchAlarmDateTotalPage(String date, int pageNum, int accumulated, int version) {
         if (token == null || date == null || date.length() == 0) {
             return;
         }
-        new ApiTask("GET", buildAlarmDateEndpoint(date, pageNum, ALARM_PAGE_SIZE), null, true, result -> {
+        String endpoint = tabEndpoints[1] + "?pageNum=" + pageNum + "&pageSize=" + ALARM_PAGE_SIZE;
+        new ApiTask("GET", endpoint, null, true, result -> {
             if (version != alarmTotalRequestVersion || currentTab != 1 || alarmHistoryAllMode || alarmUnclearedOnly || !date.equals(selectedAlarmDate())) {
                 return;
             }
@@ -1013,10 +1192,38 @@ public class MainActivity extends Activity {
             try {
                 JSONObject json = new JSONObject(result.body);
                 JSONArray rows = json.optJSONArray("rows");
-                int total = accumulated + countAlarmDate(rows, date);
-                todayAlarmTotal = total;
-                updateAlarmAllChipText();
-                if (rows != null && rows.length() >= ALARM_PAGE_SIZE) {
+                int pageCount = 0;
+                boolean sawOlder = false;
+                if (rows != null) {
+                    for (int i = 0; i < rows.length(); i++) {
+                        JSONObject item = rows.optJSONObject(i);
+                        if (item == null) {
+                            continue;
+                        }
+                        int compare = compareAlarmDate(item, date);
+                        if (compare == 0) {
+                            pageCount++;
+                        } else if (compare < 0) {
+                            sawOlder = true;
+                        }
+                    }
+                }
+                int total = accumulated + pageCount;
+                boolean reachedEnd = rows == null
+                        || rows.length() < ALARM_PAGE_SIZE
+                        || pageNum >= MAX_ALARM_DATE_SCAN_PAGES
+                        || sawOlder;
+                boolean reachedLimit = rows != null
+                        && rows.length() >= ALARM_PAGE_SIZE
+                        && pageNum >= MAX_ALARM_DATE_SCAN_PAGES
+                        && !sawOlder;
+                if (total > 0 || reachedEnd) {
+                    updateTodayAlarmTotal(date, total, reachedEnd && total == 0, reachedLimit);
+                }
+                if (rows != null
+                        && rows.length() >= ALARM_PAGE_SIZE
+                        && pageNum < MAX_ALARM_DATE_SCAN_PAGES
+                        && !sawOlder) {
                     fetchAlarmDateTotalPage(date, pageNum + 1, total, version);
                 }
             } catch (Exception ignored) {
@@ -1048,7 +1255,7 @@ public class MainActivity extends Activity {
                 if (alarmHistoryAllMode) {
                     lastAlarmTotal = historyAlarmTotal;
                 }
-                if (rows != null && rows.length() >= ALARM_PAGE_SIZE) {
+                if (rows != null && rows.length() >= ALARM_PAGE_SIZE && pageNum < MAX_ALARM_PAGE_COUNT) {
                     fetchAlarmCountPage(pageNum + 1, accumulatedRows, redrawTabs, version);
                     return;
                 }
@@ -1489,6 +1696,9 @@ public class MainActivity extends Activity {
             manager.cancel(ALARM_NOTIFICATION_ID);
             return;
         }
+        if (!canPostNotifications()) {
+            return;
+        }
         Intent intent = new Intent(this, MainActivity.class);
         intent.setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP);
         PendingIntent pendingIntent = PendingIntent.getActivity(
@@ -1511,7 +1721,16 @@ public class MainActivity extends Activity {
         if (Build.VERSION.SDK_INT >= 26) {
             builder.setBadgeIconType(Notification.BADGE_ICON_SMALL);
         }
-        manager.notify(ALARM_NOTIFICATION_ID, builder.build());
+        try {
+            manager.notify(ALARM_NOTIFICATION_ID, builder.build());
+        } catch (SecurityException ignored) {
+        } catch (RuntimeException ignored) {
+        }
+    }
+
+    private boolean canPostNotifications() {
+        return Build.VERSION.SDK_INT < 33
+                || checkSelfPermission("android.permission.POST_NOTIFICATIONS") == android.content.pm.PackageManager.PERMISSION_GRANTED;
     }
 
     private void applyDebugBadgeIntent(Intent intent) {
@@ -1618,11 +1837,35 @@ public class MainActivity extends Activity {
     }
 
     private boolean matchesAlarmDate(JSONObject item, String date) {
-        String time = firstValue(item, "createTime", "create_time", "alarmTime", "updateTime");
+        String time = alarmTimeForDateFilter(item);
         if (time.length() == 0) {
             return true;
         }
         return date != null && date.length() > 0 && time.startsWith(date);
+    }
+
+    private int compareAlarmDate(JSONObject item, String date) {
+        String time = alarmTimeForDateFilter(item);
+        if (time.length() < 10 || date == null || date.length() == 0) {
+            return 1;
+        }
+        return time.substring(0, 10).compareTo(date);
+    }
+
+    private String alarmCreatedTime(JSONObject item) {
+        return firstValue(item, "createTime", "create_time", "alarmTime");
+    }
+
+    private String alarmTimeForDateFilter(JSONObject item) {
+        String created = alarmCreatedTime(item);
+        if (created.length() > 0) {
+            return created;
+        }
+        return firstValue(item, "updateTime", "update_time");
+    }
+
+    private boolean isAlarmDateMode() {
+        return currentTab == 1 && !alarmHistoryAllMode && !alarmUnclearedOnly;
     }
 
     private String alarmListTitle() {
@@ -1636,9 +1879,6 @@ public class MainActivity extends Activity {
         String pageSize = currentTab == 1 ? String.valueOf(ALARM_PAGE_SIZE) : (currentTab == 0 || currentTab == 2 ? "200" : "20");
         String baseEndpoint = currentTab == 2 && gatewayManagementMode ? "/yujing/gateway/list" : tabEndpoints[currentTab];
         String endpoint = baseEndpoint + "?pageNum=1&pageSize=" + pageSize;
-        if (currentTab == 1 && !alarmUnclearedOnly && !alarmHistoryAllMode) {
-            endpoint = buildAlarmDateEndpoint(selectedAlarmDate(), 1, ALARM_PAGE_SIZE);
-        }
         String mac = macSearchInput == null ? "" : macSearchInput.getText().toString().trim();
         if (currentTab == 0 && mac.length() > 0) {
             try {
@@ -1653,6 +1893,8 @@ public class MainActivity extends Activity {
     private String buildAlarmDateEndpoint(String date, int pageNum, int pageSize) {
         String endpoint = tabEndpoints[1] + "?pageNum=" + pageNum + "&pageSize=" + pageSize;
         try {
+            String encodedDate = URLEncoder.encode(date, "UTF-8");
+            endpoint += "&createTime=" + encodedDate;
             endpoint += "&params%5BbeginTime%5D=" + URLEncoder.encode(date + " 00:00:00", "UTF-8");
             endpoint += "&params%5BendTime%5D=" + URLEncoder.encode(date + " 23:59:59", "UTF-8");
         } catch (Exception ignored) {
@@ -1866,7 +2108,7 @@ public class MainActivity extends Activity {
             chips.setOrientation(LinearLayout.HORIZONTAL);
             alarmAllChipView = addChip(chips, alarmAllChipText(), !alarmUnclearedOnly, v -> {
                 long now = System.currentTimeMillis();
-                if (now - lastAlarmAllClickAt < 420) {
+                if (now - lastAlarmAllClickAt < 650) {
                     alarmHistoryAllMode = !alarmHistoryAllMode;
                     alarmUnclearedOnly = false;
                     if (alarmHistoryAllMode) {
@@ -1946,6 +2188,24 @@ public class MainActivity extends Activity {
         page.addView(row);
     }
 
+    private void addFixedAlarmSectionHeader(LinearLayout page) {
+        if (currentTab != 1) {
+            return;
+        }
+        LinearLayout row = createSectionTitleRow(alarmListTitle(), "实时刷新", true);
+        row.setBackgroundColor(PAGE_BG);
+        page.addView(row);
+    }
+
+    private void updateFixedAlarmSectionHeader() {
+        if (fixedAlarmTitleView != null) {
+            fixedAlarmTitleView.setText(alarmListTitle());
+        }
+        if (fixedAlarmHintView != null) {
+            fixedAlarmHintView.setText("实时刷新");
+        }
+    }
+
     private void updateFixedMouldGatewayCount(String text) {
         if (fixedMouldGatewayCountView != null) {
             fixedMouldGatewayCountView.setText(text);
@@ -1960,7 +2220,8 @@ public class MainActivity extends Activity {
         if (alarmHistoryAllMode) {
             return "全部报警 " + Math.max(historyAlarmTotal, 0);
         }
-        return "今日全部 " + Math.max(todayAlarmTotal, 0);
+        String prefix = selectedAlarmDate().equals(todayPrefix()) ? "今日全部 " : "日期全部 ";
+        return prefix + Math.max(todayAlarmTotal, 0) + (todayAlarmTotalHasMore ? "+" : "");
     }
 
     private void updateAlarmAllChipText() {
@@ -2472,10 +2733,17 @@ public class MainActivity extends Activity {
     }
 
     private void addSectionTitle(String titleText, String hintText) {
+        content.addView(createSectionTitleRow(titleText, hintText, false));
+    }
+
+    private LinearLayout createSectionTitleRow(String titleText, String hintText, boolean fixed) {
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setPadding(dp(2), currentTab == 1 || currentTab == 2 ? dp(6) : dp(14), dp(2), dp(2));
+        row.setPadding(fixed ? dp(14) : dp(2),
+                fixed || currentTab == 1 || currentTab == 2 ? dp(6) : dp(14),
+                fixed ? dp(14) : dp(2),
+                dp(2));
 
         TextView bar = new TextView(this);
         bar.setText("");
@@ -2489,14 +2757,20 @@ public class MainActivity extends Activity {
         title.setTextSize(15);
         title.setTypeface(null, 1);
         title.setTextColor(INK);
+        if (fixed && currentTab == 1) {
+            fixedAlarmTitleView = title;
+        }
         row.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
 
         TextView hint = new TextView(this);
         hint.setText(hintText);
         hint.setTextSize(12);
         hint.setTextColor(MUTED);
+        if (fixed && currentTab == 1) {
+            fixedAlarmHintView = hint;
+        }
         row.addView(hint);
-        content.addView(row);
+        return row;
     }
 
     private void renderGatewayManagement(JSONArray rows) {
@@ -6174,13 +6448,27 @@ public class MainActivity extends Activity {
     }
 
     private void setLoading(boolean show) {
+        if (loading == null) {
+            return;
+        }
         loading.setVisibility(show ? View.VISIBLE : View.GONE);
     }
 
     private void showStyledDialog(AlertDialog dialog) {
-        dialog.show();
+        if (dialog == null || !isActivityUsable()) {
+            return;
+        }
+        try {
+            dialog.show();
+        } catch (RuntimeException ignored) {
+            return;
+        }
         styleDialogWindow(dialog);
         styleDialogButtons(dialog);
+    }
+
+    private boolean isActivityUsable() {
+        return !isFinishing() && (Build.VERSION.SDK_INT < 17 || !isDestroyed());
     }
 
     private void styleDialogWindow(AlertDialog dialog) {
@@ -6258,6 +6546,9 @@ public class MainActivity extends Activity {
     }
 
     private void toast(String text) {
+        if (!isActivityUsable()) {
+            return;
+        }
         Toast.makeText(this, text, Toast.LENGTH_SHORT).show();
     }
 
@@ -6381,6 +6672,9 @@ public class MainActivity extends Activity {
 
         @Override
         protected void onPostExecute(OptionsState optionsState) {
+            if (!isActivityUsable()) {
+                return;
+            }
             callback.done(optionsState);
         }
     }
@@ -6439,6 +6733,9 @@ public class MainActivity extends Activity {
 
         @Override
         protected void onPostExecute(ApiResult apiResult) {
+            if (!isActivityUsable()) {
+                return;
+            }
             callback.done(apiResult);
         }
     }
