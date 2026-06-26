@@ -532,7 +532,7 @@ public class MainActivity extends Activity {
         panel.addView(tip, topMargin(dp(14)));
 
         TextView version = new TextView(this);
-        version.setText("作者 kunkun  版本号 1.0.20");
+        version.setText("作者 kunkun  版本号 1.0.40");
         version.setTextSize(13);
         version.setTextColor(0xffb7c9d9);
         version.setGravity(Gravity.CENTER);
@@ -749,6 +749,7 @@ public class MainActivity extends Activity {
                                 .putString("saved_password", remember ? password : "")
                                 .apply();
                         if (!username.equals(previousUser)) {
+                            resetAlarmSessionState();
                             macSearchInput = null;
                             expandedMouldIds.clear();
                             expandedAlarmIds.clear();
@@ -1235,13 +1236,14 @@ public class MainActivity extends Activity {
         if (token == null) {
             return;
         }
+        String tokenSnapshot = token;
         int version = ++alarmCountRequestVersion;
-        fetchAlarmCountPage(1, new JSONArray(), redrawTabs, version);
+        fetchAlarmCountPage(1, new JSONArray(), redrawTabs, version, tokenSnapshot);
     }
 
-    private void fetchAlarmCountPage(int pageNum, JSONArray accumulatedRows, boolean redrawTabs, int version) {
+    private void fetchAlarmCountPage(int pageNum, JSONArray accumulatedRows, boolean redrawTabs, int version, String tokenSnapshot) {
         new ApiTask("GET", tabEndpoints[1] + "?pageNum=" + pageNum + "&pageSize=" + ALARM_PAGE_SIZE, null, true, result -> {
-            if (version != alarmCountRequestVersion) {
+            if (version != alarmCountRequestVersion || token == null || tokenSnapshot == null || !tokenSnapshot.equals(token)) {
                 return;
             }
             if (!result.ok) {
@@ -1256,7 +1258,7 @@ public class MainActivity extends Activity {
                     lastAlarmTotal = historyAlarmTotal;
                 }
                 if (rows != null && rows.length() >= ALARM_PAGE_SIZE && pageNum < MAX_ALARM_PAGE_COUNT) {
-                    fetchAlarmCountPage(pageNum + 1, accumulatedRows, redrawTabs, version);
+                    fetchAlarmCountPage(pageNum + 1, accumulatedRows, redrawTabs, version, tokenSnapshot);
                     return;
                 }
                 updateAlarmAllChipText();
@@ -1264,6 +1266,28 @@ public class MainActivity extends Activity {
             } catch (Exception ignored) {
             }
         }).execute();
+    }
+
+    private void resetAlarmSessionState() {
+        alarmCountRequestVersion++;
+        alarmTotalRequestVersion++;
+        listRequestVersion++;
+        loadingListRequestVersion++;
+        unreadAlarmCount = 0;
+        audibleAlarmCount = 0;
+        lastAlarmTotal = -1;
+        todayAlarmTotal = -1;
+        historyAlarmTotal = -1;
+        lastSeenAlarmKey = "";
+        lastAudibleAlarmKey = "";
+        activeAlarmMouldIds.clear();
+        offlineAlarmMouldIds.clear();
+        visibleMouldAlarmIcons.clear();
+        expandedAlarmIds.clear();
+        stopAlarmSoundLoop();
+        stopAlarmVibrationLoop();
+        updateLauncherAlarmBadge();
+        updateAlarmTabIconTint();
     }
 
     private void appendRows(JSONArray target, JSONArray source) {
@@ -1403,6 +1427,25 @@ public class MainActivity extends Activity {
         }
         String mouldId = alarmMouldId(alarm);
         return mouldId.length() > 0 && offlineAlarmMouldIds.contains(mouldId);
+    }
+
+    private String alarmMouldStateLabel(JSONObject alarm) {
+        return isOfflineSensorAlarm(alarm) ? "离线模具" : "在线模具";
+    }
+
+    private TextView alarmMouldStateChip(JSONObject alarm) {
+        boolean offline = isOfflineSensorAlarm(alarm);
+        TextView chip = new TextView(this);
+        chip.setText(alarmMouldStateLabel(alarm));
+        chip.setTextSize(10);
+        chip.setTypeface(null, 1);
+        chip.setGravity(Gravity.CENTER);
+        chip.setSingleLine(true);
+        chip.setTextColor(offline ? 0xffb45309 : 0xff047857);
+        chip.setPadding(dp(6), 0, dp(6), 0);
+        chip.setBackground(roundedStroke(offline ? 0xfffffbeb : 0xffecfdf5, 10,
+                offline ? 0xfffbbf24 : 0xff86efac));
+        return chip;
     }
 
     private void playAlarmSound(boolean force) {
@@ -2382,6 +2425,7 @@ public class MainActivity extends Activity {
         exit.setTextColor(RED);
         exit.setOnClickListener(v -> {
             stopAlarmMonitorService();
+            resetAlarmSessionState();
             getSharedPreferences(PREFS, MODE_PRIVATE).edit().remove("token").apply();
             token = null;
             showLogin();
@@ -3381,7 +3425,7 @@ public class MainActivity extends Activity {
         card.addView(copy, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
 
         TextView status = sensorStatusChip(item);
-        LinearLayout.LayoutParams statusParams = new LinearLayout.LayoutParams(dp(48), dp(26));
+        LinearLayout.LayoutParams statusParams = new LinearLayout.LayoutParams(dp(40), dp(21));
         statusParams.leftMargin = dp(6);
         statusParams.rightMargin = dp(6);
         card.addView(status, statusParams);
@@ -3536,9 +3580,9 @@ public class MainActivity extends Activity {
         ImageView icon = new ImageView(this);
         icon.setImageResource(R.drawable.ic_alarm);
         icon.setColorFilter(active ? RED : GREEN);
-        icon.setPadding(dp(6), dp(6), dp(6), dp(6));
-        icon.setBackground(rounded(active ? 0xfffff1f2 : 0xffecfdf5, 12));
-        LinearLayout.LayoutParams iconParams = new LinearLayout.LayoutParams(dp(30), dp(30));
+        icon.setPadding(dp(7), dp(7), dp(7), dp(7));
+        icon.setBackground(rounded(active ? 0xfffff1f2 : 0xffecfdf5, 11));
+        LinearLayout.LayoutParams iconParams = new LinearLayout.LayoutParams(dp(34), dp(34));
         iconParams.rightMargin = dp(8);
         topRow.addView(icon, iconParams);
 
@@ -3557,6 +3601,13 @@ public class MainActivity extends Activity {
         title.setTypeface(null, 1);
         title.setSingleLine(false);
         head.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+
+        TextView mouldState = alarmMouldStateChip(item);
+        LinearLayout.LayoutParams mouldStateParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, dp(21));
+        mouldStateParams.leftMargin = dp(6);
+        mouldStateParams.rightMargin = dp(6);
+        head.addView(mouldState, mouldStateParams);
 
         TextView badge = badgeText(item);
         if (badge != null) {
@@ -3617,6 +3668,7 @@ public class MainActivity extends Activity {
         addAlarmPressureDetails(container, item);
 
         LinearLayout info = infoPanel();
+        addInfoItem(info, "模具状态", alarmMouldStateLabel(item));
         addInfoItem(info, "报警时间", clean(firstValue(item, "createTime", "create_time", "alarmTime")));
         addInfoItem(info, "更新时间", clean(firstValue(item, "updateTime", "update_time")));
         JSONObject mould = item.optJSONObject("mould");
@@ -3822,12 +3874,12 @@ public class MainActivity extends Activity {
         boolean online = "在线".equals(status);
         TextView badge = new TextView(this);
         badge.setText(status);
-        badge.setTextSize(12);
+        badge.setTextSize(11);
         badge.setTypeface(null, 1);
         badge.setTextColor(online ? GREEN : 0xff64748b);
         badge.setGravity(Gravity.CENTER);
-        badge.setBackground(roundedStroke(online ? 0xffecfdf5 : 0xfff1f5f9, 14, online ? 0xff86efac : 0xffd7dee8));
-        badge.setPadding(dp(10), dp(4), dp(10), dp(4));
+        badge.setBackground(roundedStroke(online ? 0xffecfdf5 : 0xfff1f5f9, 11, online ? 0xff86efac : 0xffd7dee8));
+        badge.setPadding(dp(8), dp(3), dp(8), dp(3));
         return badge;
     }
 
@@ -3911,8 +3963,10 @@ public class MainActivity extends Activity {
         smoothElevation(card, 3);
 
         LinearLayout head = new LinearLayout(this);
-        head.setOrientation(LinearLayout.HORIZONTAL);
-        head.setGravity(Gravity.CENTER_VERTICAL);
+        head.setOrientation(LinearLayout.VERTICAL);
+        head.setGravity(Gravity.CENTER);
+
+        FrameLayout topLine = new FrameLayout(this);
 
         ImageView icon = new ImageView(this);
         icon.setPadding(dp(7), dp(7), dp(7), dp(7));
@@ -3920,17 +3974,69 @@ public class MainActivity extends Activity {
         if (mouldId.length() > 0) {
             visibleMouldAlarmIcons.put(mouldId, icon);
         }
-        LinearLayout.LayoutParams iconParams = new LinearLayout.LayoutParams(dp(34), dp(34));
-        iconParams.rightMargin = dp(10);
-        head.addView(icon, iconParams);
+        FrameLayout.LayoutParams iconParams = new FrameLayout.LayoutParams(dp(34), dp(34));
+        iconParams.gravity = Gravity.LEFT | Gravity.CENTER_VERTICAL;
+        topLine.addView(icon, iconParams);
 
-        TextView title = new TextView(this);
-        title.setText(primaryTitle(item));
-        title.setTextSize(16);
-        title.setTextColor(INK);
-        title.setTypeface(null, 1);
-        title.setSingleLine(false);
-        head.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        String number = clean(item.optString("number"));
+        String name = clean(item.optString("name"));
+        if (number.length() == 0 && name.length() == 0) {
+            number = primaryTitle(item);
+        }
+
+        LinearLayout numberRow = new LinearLayout(this);
+        numberRow.setOrientation(LinearLayout.HORIZONTAL);
+        numberRow.setGravity(Gravity.CENTER_VERTICAL);
+        numberRow.setPadding(dp(42), 0, dp(144), 0);
+
+        TextView numberLabel = new TextView(this);
+        numberLabel.setText("编号");
+        numberLabel.setTextSize(13);
+        numberLabel.setTextColor(0xff64748b);
+        numberLabel.setGravity(Gravity.LEFT | Gravity.CENTER_VERTICAL);
+        numberRow.addView(numberLabel, new LinearLayout.LayoutParams(dp(30), ViewGroup.LayoutParams.MATCH_PARENT));
+
+        TextView numberValue = new TextView(this);
+        numberValue.setText(number);
+        numberValue.setTextSize(14);
+        numberValue.setTextColor(INK);
+        numberValue.setTypeface(null, 1);
+        numberValue.setGravity(Gravity.LEFT | Gravity.CENTER_VERTICAL);
+        numberValue.setSingleLine(true);
+        numberValue.setEllipsize(TextUtils.TruncateAt.END);
+        numberRow.addView(numberValue, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1));
+
+        FrameLayout.LayoutParams numberParams = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(30));
+        numberParams.gravity = Gravity.TOP | Gravity.LEFT;
+        topLine.addView(numberRow, numberParams);
+
+        LinearLayout nameRow = new LinearLayout(this);
+        nameRow.setOrientation(LinearLayout.HORIZONTAL);
+        nameRow.setGravity(Gravity.CENTER_VERTICAL);
+        nameRow.setPadding(dp(42), 0, dp(4), 0);
+
+        TextView nameLabel = new TextView(this);
+        nameLabel.setText("名称");
+        nameLabel.setTextSize(13);
+        nameLabel.setTextColor(0xff64748b);
+        nameLabel.setGravity(Gravity.LEFT | Gravity.CENTER_VERTICAL);
+        nameRow.addView(nameLabel, new LinearLayout.LayoutParams(dp(30), ViewGroup.LayoutParams.MATCH_PARENT));
+
+        TextView nameValue = new TextView(this);
+        nameValue.setText(name);
+        nameValue.setTextSize(14);
+        nameValue.setTextColor(INK);
+        nameValue.setTypeface(null, 1);
+        nameValue.setGravity(Gravity.LEFT | Gravity.CENTER_VERTICAL);
+        nameValue.setSingleLine(true);
+        nameValue.setEllipsize(TextUtils.TruncateAt.END);
+        nameRow.addView(nameValue, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1));
+
+        FrameLayout.LayoutParams nameParams = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(30));
+        nameParams.gravity = Gravity.BOTTOM | Gravity.LEFT;
+        topLine.addView(nameRow, nameParams);
 
         LinearLayout rightMeta = new LinearLayout(this);
         rightMeta.setOrientation(LinearLayout.HORIZONTAL);
@@ -3939,27 +4045,30 @@ public class MainActivity extends Activity {
         TextView status = mouldStatusChip(item);
         LinearLayout statusSlot = new LinearLayout(this);
         statusSlot.setGravity(Gravity.CENTER);
-        statusSlot.addView(status, new LinearLayout.LayoutParams(dp(52), dp(26)));
-        rightMeta.addView(statusSlot, new LinearLayout.LayoutParams(dp(64), dp(30)));
+        statusSlot.addView(status, new LinearLayout.LayoutParams(dp(40), dp(21)));
+        rightMeta.addView(statusSlot, new LinearLayout.LayoutParams(dp(42), dp(28)));
 
         TextView count = new TextView(this);
         int sensorCount = item.optInt("_sensorCount", 0);
         count.setText(sensorCount + "个传感器");
-        count.setTextSize(12);
+        count.setTextSize(11);
         count.setTextColor(0xff475569);
         count.setGravity(Gravity.CENTER);
         count.setSingleLine(false);
-        rightMeta.addView(count, new LinearLayout.LayoutParams(dp(74), dp(30)));
+        rightMeta.addView(count, new LinearLayout.LayoutParams(dp(62), dp(28)));
 
         TextView arrow = foldArrow(expanded);
         LinearLayout arrowSlot = new LinearLayout(this);
         arrowSlot.setGravity(Gravity.CENTER);
         arrowSlot.addView(arrow, new LinearLayout.LayoutParams(dp(26), dp(26)));
-        rightMeta.addView(arrowSlot, new LinearLayout.LayoutParams(dp(34), dp(30)));
+        rightMeta.addView(arrowSlot, new LinearLayout.LayoutParams(dp(28), dp(28)));
 
-        LinearLayout.LayoutParams metaParams = new LinearLayout.LayoutParams(dp(172), dp(30));
-        metaParams.leftMargin = dp(8);
-        head.addView(rightMeta, metaParams);
+        FrameLayout.LayoutParams metaParams = new FrameLayout.LayoutParams(dp(132), dp(28));
+        metaParams.gravity = Gravity.RIGHT | Gravity.TOP;
+        topLine.addView(rightMeta, metaParams);
+
+        head.addView(topLine, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(62)));
         card.addView(head);
 
         LinearLayout detailContainer = new LinearLayout(this);
@@ -4028,11 +4137,11 @@ public class MainActivity extends Activity {
         TextView status = new TextView(this);
         boolean offline = item.optBoolean("_offlinePressure");
         status.setText(offline ? "离线" : "在线");
-        status.setTextSize(11);
+        status.setTextSize(10);
         status.setTypeface(null, 1);
         status.setTextColor(offline ? 0xffb45309 : 0xff059669);
         status.setGravity(Gravity.CENTER);
-        status.setBackground(roundedStroke(offline ? 0xfffff7ed : 0xffecfdf5, 13, offline ? 0xfffdba74 : 0xff86efac));
+        status.setBackground(roundedStroke(offline ? 0xfffff7ed : 0xffecfdf5, 10, offline ? 0xfffdba74 : 0xff86efac));
         return status;
     }
 
@@ -5821,10 +5930,10 @@ public class MainActivity extends Activity {
             TextView badge = new TextView(this);
             boolean offline = item.optBoolean("_offlinePressure");
             badge.setText(offline ? "离线" : "在线");
-            badge.setTextSize(12);
+            badge.setTextSize(11);
             badge.setTextColor(offline ? 0xff8a5b00 : 0xff047857);
-            badge.setPadding(dp(10), dp(5), dp(10), dp(5));
-            badge.setBackground(roundedStroke(offline ? 0xfffff8e5 : 0xffecfdf5, 12, offline ? 0xfff3d77a : 0xffa7f3d0));
+            badge.setPadding(dp(8), dp(3), dp(8), dp(3));
+            badge.setBackground(roundedStroke(offline ? 0xfffff8e5 : 0xffecfdf5, 10, offline ? 0xfff3d77a : 0xffa7f3d0));
             return badge;
         }
         String status = item.optString("status");
@@ -5835,10 +5944,10 @@ public class MainActivity extends Activity {
                 boolean cleared = isAlarmCleared(raw);
                 TextView badge = new TextView(this);
                 badge.setText(cleared ? "已消除" : "未消除");
-                badge.setTextSize(12);
+                badge.setTextSize(11);
                 badge.setTextColor(cleared ? 0xff0f766e : 0xffdc2626);
-                badge.setPadding(dp(10), dp(5), dp(10), dp(5));
-                badge.setBackground(roundedStroke(cleared ? 0xffecfdf5 : 0xfffff1f2, 12, cleared ? 0xffa7f3d0 : 0xffffb4bf));
+                badge.setPadding(dp(8), dp(3), dp(8), dp(3));
+                badge.setBackground(roundedStroke(cleared ? 0xffecfdf5 : 0xfffff1f2, 10, cleared ? 0xffa7f3d0 : 0xffffb4bf));
                 return badge;
             }
         }
@@ -5847,10 +5956,10 @@ public class MainActivity extends Activity {
             boolean offline = isSensorOffline(item);
             TextView badge = new TextView(this);
             badge.setText(text);
-            badge.setTextSize(12);
+            badge.setTextSize(11);
             badge.setTextColor(offline ? 0xff92400e : 0xff0f766e);
-            badge.setPadding(dp(10), dp(5), dp(10), dp(5));
-            badge.setBackground(roundedStroke(offline ? 0xfffff8e5 : 0xffecfdf5, 12, offline ? 0xfff3d77a : 0xffa7f3d0));
+            badge.setPadding(dp(8), dp(3), dp(8), dp(3));
+            badge.setBackground(roundedStroke(offline ? 0xfffff8e5 : 0xffecfdf5, 10, offline ? 0xfff3d77a : 0xffa7f3d0));
             return badge;
         }
         if (currentTab == 2 && status.length() > 0 && !"null".equals(status)) {
@@ -5858,10 +5967,10 @@ public class MainActivity extends Activity {
             boolean offline = isOfflineStatus(status);
             TextView badge = new TextView(this);
             badge.setText(text);
-            badge.setTextSize(12);
+            badge.setTextSize(11);
             badge.setTextColor(offline ? 0xff92400e : 0xff0f766e);
-            badge.setPadding(dp(10), dp(5), dp(10), dp(5));
-            badge.setBackground(roundedStroke(offline ? 0xfffff8e5 : 0xffecfdf5, 12, offline ? 0xfff3d77a : 0xffa7f3d0));
+            badge.setPadding(dp(8), dp(3), dp(8), dp(3));
+            badge.setBackground(roundedStroke(offline ? 0xfffff8e5 : 0xffecfdf5, 10, offline ? 0xfff3d77a : 0xffa7f3d0));
             return badge;
         }
         String text = status.length() > 0 ? "在线 " + status : state.length() > 0 ? "状态 " + state : "";
@@ -5870,10 +5979,10 @@ public class MainActivity extends Activity {
         }
         TextView badge = new TextView(this);
         badge.setText(text);
-        badge.setTextSize(12);
+        badge.setTextSize(11);
         badge.setTextColor(0xff0f766e);
-        badge.setPadding(dp(10), dp(5), dp(10), dp(5));
-        badge.setBackground(roundedStroke(0xffecfdf5, 12, 0xffa7f3d0));
+        badge.setPadding(dp(8), dp(3), dp(8), dp(3));
+        badge.setBackground(roundedStroke(0xffecfdf5, 10, 0xffa7f3d0));
         return badge;
     }
 
@@ -6054,11 +6163,11 @@ public class MainActivity extends Activity {
         boolean unknown = "-".equals(text);
         TextView chip = new TextView(this);
         chip.setText(text);
-        chip.setTextSize(11);
+        chip.setTextSize(10);
         chip.setTypeface(null, 1);
         chip.setGravity(Gravity.CENTER);
         chip.setTextColor(offline || unknown ? 0xff64748b : 0xff059669);
-        chip.setBackground(roundedStroke(offline || unknown ? 0xfff1f5f9 : 0xffecfdf5, 13, offline || unknown ? 0xffcbd5e1 : 0xff86efac));
+        chip.setBackground(roundedStroke(offline || unknown ? 0xfff1f5f9 : 0xffecfdf5, 10, offline || unknown ? 0xffcbd5e1 : 0xff86efac));
         return chip;
     }
 
