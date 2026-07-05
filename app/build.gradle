@@ -10,7 +10,7 @@ android {
         applicationId "cn.mitebo.iot"
         minSdk 23
         targetSdk 35
-        versionCode 40
-        versionName "1.0.40"
+        versionCode 52
+        versionName "1.0.52"
     }
 }

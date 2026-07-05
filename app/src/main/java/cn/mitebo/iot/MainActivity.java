@@ -98,7 +98,7 @@ public class MainActivity extends Activity {
     private static final int SOFT = 0xfff6f9fd;
     private static final String ALARM_CHANNEL_ID = "alarm_badge";
     private static final int ALARM_NOTIFICATION_ID = 1024;
-    private static final long STATIC_PRESSURE_STABLE_MS = 10000;
+    private static final long STATIC_PRESSURE_STABLE_MS = 3 * 60 * 1000L;
     private static final long DEFAULT_REFRESH_MS = 15000;
     private static final long ALARM_REFRESH_MS = 5000;
     private static final long MOULD_REFRESH_MS = 5000;
@@ -459,7 +459,7 @@ public class MainActivity extends Activity {
         accountRow.addView(divider, new LinearLayout.LayoutParams(dp(1), dp(26)));
         TextView accountPicker = new TextView(this);
         accountPicker.setText("▾");
-        accountPicker.setTextSize(18);
+        accountPicker.setTextSize(20);
         accountPicker.setTypeface(null, 1);
         accountPicker.setTextColor(0xff64748b);
         accountPicker.setGravity(Gravity.CENTER);
@@ -532,7 +532,7 @@ public class MainActivity extends Activity {
         panel.addView(tip, topMargin(dp(14)));
 
         TextView version = new TextView(this);
-        version.setText("作者 kunkun  版本号 1.0.40");
+        version.setText("作者 kunkun  版本号 1.0.52");
         version.setTextSize(13);
         version.setTextColor(0xffb7c9d9);
         version.setGravity(Gravity.CENTER);
@@ -2416,7 +2416,7 @@ public class MainActivity extends Activity {
             public void onNothingSelected(AdapterView<?> parent) {
             }
         });
-        preferenceCard.addView(settingsActionRow("压力单位", "同步组织页面单位", unitSpinner));
+        preferenceCard.addView(settingsActionRow("压力单位", "切换压力单位", unitSpinner));
         content.addView(preferenceCard, topMargin(dp(8)));
 
         LinearLayout appCard = settingsCard("账号", "当前登录账号与退出");
@@ -2889,14 +2889,17 @@ public class MainActivity extends Activity {
                     }
                     String mouldId = mould.optString("id");
                     String stateMouldId = mouldStateKey(mouldId);
-                    boolean busy = isMouldBusyByWebRule(mould);
-                    boolean wasBusy = Boolean.TRUE.equals(mouldBusyById.get(stateMouldId));
-                    if (busy) {
+                    Boolean previousBusy = mouldBusyById.get(stateMouldId);
+                    Boolean busyState = mouldBusyStateByWebRule(mould);
+                    if (busyState == null) {
+                        busyState = previousBusy;
+                    }
+                    if (Boolean.TRUE.equals(busyState)) {
                         busyMouldIds.put(mouldId, true);
                         mouldBusyById.put(stateMouldId, true);
-                    } else {
+                    } else if (Boolean.FALSE.equals(busyState)) {
                         offlineMouldIds.put(mouldId, true);
-                        if (wasBusy) {
+                        if (Boolean.TRUE.equals(previousBusy)) {
                             activeMouldUntil.put(stateMouldId, now - 1);
                         }
                         mouldBusyById.put(stateMouldId, false);
@@ -2919,11 +2922,11 @@ public class MainActivity extends Activity {
                             liveMouldIds.put(mouldId, true);
                             if (Boolean.TRUE.equals(busyMouldIds.get(mouldId))) {
                                 updateStaticPressure(device, false);
-                            } else {
-                                updateStaticPressure(device, Boolean.TRUE.equals(offlineMouldIds.get(mouldId)) || canCaptureStaticAfterMouldOffline(mouldId, now));
+                            } else if (Boolean.TRUE.equals(offlineMouldIds.get(mouldId)) || canCaptureStaticAfterMouldOffline(mouldId, now)) {
+                                updateStaticPressure(device, true);
                             }
-                        } else {
-                            updateStaticPressure(device, Boolean.TRUE.equals(offlineMouldIds.get(mouldId)) || canCaptureStaticAfterMouldOffline(mouldId, now));
+                        } else if (Boolean.TRUE.equals(offlineMouldIds.get(mouldId)) || canCaptureStaticAfterMouldOffline(mouldId, now)) {
+                            updateStaticPressure(device, true);
                         }
                     }
                 }
@@ -3034,21 +3037,46 @@ public class MainActivity extends Activity {
         return false;
     }
 
-    private boolean isMouldBusyByWebRule(JSONObject mould) {
-        // 模具在线/离线跟随网页规则：优先使用后端状态字段，只有没有明确状态时才回退到文本识别。
-        String state = firstValue(mould, "state", "status", "mouldState", "mould_state");
+    private Boolean mouldBusyStateByWebRule(JSONObject mould) {
+        if (mould == null) {
+            return null;
+        }
+        // 模具中心可在专用生产状态缺失时回退到列表状态字段。
+        Boolean state = parseMouldBusyState(firstValue(mould, "state", "mouldState", "mould_state"));
+        return state != null ? state : parseMouldBusyState(firstValue(mould, "status"));
+    }
+
+    private Boolean nestedDeviceMouldBusyState(JSONObject mould) {
+        if (mould == null) {
+            return null;
+        }
+        // 设备内嵌的 status 常表示记录是否启用，不能用来判断模具是否生产。
+        return parseMouldBusyState(firstValue(mould, "state", "mouldState", "mould_state"));
+    }
+
+    private Boolean parseMouldBusyState(String state) {
         if ("2".equals(state)) {
-            return true;
+            return Boolean.TRUE;
         }
         if ("0".equals(state) || "1".equals(state)) {
-            return false;
+            return Boolean.FALSE;
         }
         String text = state.toLowerCase();
-        return text.contains("busy")
+        if (text.contains("busy")
                 || text.contains("online")
                 || text.contains("生产")
                 || text.contains("忙")
-                || text.contains("在线");
+                || text.contains("在线")) {
+            return Boolean.TRUE;
+        }
+        if (text.contains("offline")
+                || text.contains("idle")
+                || text.contains("离线")
+                || text.contains("停机")
+                || text.contains("空闲")) {
+            return Boolean.FALSE;
+        }
+        return null;
     }
 
     private boolean hasPressureFluctuation(JSONObject device) {
@@ -3100,24 +3128,31 @@ public class MainActivity extends Activity {
         if (pressure == null || rawKey.length() == 0 || key.length() == 0) {
             return;
         }
+        restoreStaticPressureLock(key);
         // 模具在线生产时只记录“见过动态压力”，不采集静止压力，避免动态压力把已锁定值顶掉。
         if (!allowOfflineCapture) {
             dynamicSeenByDevice.put(key, true);
+            setStaticPressurePending(key, true);
             stableCandidatePressureByDevice.remove(key);
             stableSinceByDevice.remove(key);
             return;
         }
         // 已采集的静止压力保持锁定；只有经历过生产动态后再次下线，才开启下一轮静止采集。
+        boolean pendingCapture = Boolean.TRUE.equals(dynamicSeenByDevice.get(key)) || staticPressurePending(key);
         if (Boolean.TRUE.equals(staticPressureCapturedByDevice.get(key))) {
-            if (Boolean.TRUE.equals(dynamicSeenByDevice.get(key))) {
+            if (pendingCapture) {
                 staticPressureCapturedByDevice.put(key, false);
                 stableCandidatePressureByDevice.put(key, pressure);
                 stableSinceByDevice.put(key, System.currentTimeMillis());
             }
             return;
         }
+        // 已有静止压力且没有经历在线生产时保持锁定，禁止 App 重启后的首次刷新直接覆盖。
+        if (existingStaticPressure(device) != null && !pendingCapture) {
+            staticPressureCapturedByDevice.put(key, true);
+            return;
+        }
         // 下线后压力连续稳定达到阈值时间，才同步为新的静止压力。
-        // 本地已有旧静止压力时也允许离线后重新校准一次，避免换账号或重启 App 后一直显示历史旧值。
         long now = System.currentTimeMillis();
         Double candidate = stableCandidatePressureByDevice.get(key);
         if (candidate == null || Math.abs(pressure - candidate) >= STATIC_PRESSURE_STABLE_DELTA) {
@@ -3136,6 +3171,20 @@ public class MainActivity extends Activity {
                 setStaticPressureViewText(standardView, pressureWithUnit(trimNumber(pressure)));
             }
         }
+    }
+
+    private void restoreStaticPressureLock(String key) {
+        if (key == null || key.length() == 0 || staticPressureCapturedByDevice.containsKey(key)) {
+            return;
+        }
+        Double value = staticPressureByDevice.get(key);
+        if (value == null) {
+            value = storedStaticPressure(key);
+            if (value != null) {
+                staticPressureByDevice.put(key, value);
+            }
+        }
+        staticPressureCapturedByDevice.put(key, value != null);
     }
 
     private void setStaticPressureViewText(TextView view, String value) {
@@ -3171,6 +3220,23 @@ public class MainActivity extends Activity {
         }
         getSharedPreferences(PREFS, MODE_PRIVATE).edit()
                 .putString("static_pressure_" + key, trimNumber(pressure))
+                .putBoolean("static_pressure_pending_" + key, false)
+                .apply();
+    }
+
+    private boolean staticPressurePending(String key) {
+        return key != null
+                && key.length() > 0
+                && getSharedPreferences(PREFS, MODE_PRIVATE)
+                .getBoolean("static_pressure_pending_" + key, false);
+    }
+
+    private void setStaticPressurePending(String key, boolean pending) {
+        if (key == null || key.length() == 0 || staticPressurePending(key) == pending) {
+            return;
+        }
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                .putBoolean("static_pressure_pending_" + key, pending)
                 .apply();
     }
 
@@ -3390,15 +3456,25 @@ public class MainActivity extends Activity {
         copy.setOrientation(LinearLayout.VERTICAL);
         copy.setGravity(Gravity.CENTER_VERTICAL);
 
+        LinearLayout titleRow = new LinearLayout(this);
+        titleRow.setOrientation(LinearLayout.HORIZONTAL);
+        titleRow.setGravity(Gravity.CENTER_VERTICAL);
+
         TextView title = new TextView(this);
         String deviceNumber = firstNonEmpty(firstValue(item, "mac", "macAddress", "number"), primaryTitle(item));
-        title.setText(deviceNumber);
+        title.setText("MAC：" + deviceNumber);
         title.setTextSize(14);
         title.setTypeface(null, 1);
         title.setTextColor(INK);
         title.setSingleLine(true);
         title.setEllipsize(TextUtils.TruncateAt.END);
-        copy.addView(title);
+        titleRow.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+
+        TextView status = sensorStatusChip(item);
+        LinearLayout.LayoutParams statusParams = new LinearLayout.LayoutParams(dp(40), dp(21));
+        statusParams.leftMargin = dp(6);
+        titleRow.addView(status, statusParams);
+        copy.addView(titleRow, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         String mould = "-";
         JSONObject mouldObj = item.optJSONObject("mould");
@@ -3424,12 +3500,6 @@ public class MainActivity extends Activity {
         copy.addView(meta);
         card.addView(copy, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
 
-        TextView status = sensorStatusChip(item);
-        LinearLayout.LayoutParams statusParams = new LinearLayout.LayoutParams(dp(40), dp(21));
-        statusParams.leftMargin = dp(6);
-        statusParams.rightMargin = dp(6);
-        card.addView(status, statusParams);
-
         LinearLayout pressureBox = new LinearLayout(this);
         pressureBox.setOrientation(LinearLayout.VERTICAL);
         pressureBox.setGravity(Gravity.RIGHT | Gravity.CENTER_VERTICAL);
@@ -3448,7 +3518,7 @@ public class MainActivity extends Activity {
         pressure.setGravity(Gravity.RIGHT);
         pressure.setSingleLine(true);
         pressureBox.addView(pressure, topMargin(dp(2)));
-        card.addView(pressureBox, new LinearLayout.LayoutParams(dp(86), ViewGroup.LayoutParams.WRAP_CONTENT));
+        card.addView(pressureBox, new LinearLayout.LayoutParams(dp(68), ViewGroup.LayoutParams.WRAP_CONTENT));
 
         TextView arrow = new TextView(this);
         arrow.setText("›");
@@ -3822,14 +3892,16 @@ public class MainActivity extends Activity {
         LinearLayout actions = new LinearLayout(this);
         actions.setOrientation(LinearLayout.HORIZONTAL);
         actions.setGravity(Gravity.CENTER);
-        TextView changeMould = gatewayActionButton("↔  更换模具");
+        actions.addView(new View(this), new LinearLayout.LayoutParams(0, dp(32), 0.075f));
+        TextView changeMould = gatewayActionButton("更换模具");
         changeMould.setOnClickListener(v -> showGatewayMouldDialog(item));
-        actions.addView(changeMould, new LinearLayout.LayoutParams(0, dp(32), 1));
-        TextView detail = gatewayActionButton("✎  网关信息修改");
+        actions.addView(changeMould, new LinearLayout.LayoutParams(0, dp(32), 0.425f));
+        TextView detail = gatewayActionButton("网关信息修改");
         detail.setOnClickListener(v -> showGatewayInfoEdit(item));
-        LinearLayout.LayoutParams detailParams = new LinearLayout.LayoutParams(0, dp(32), 1);
-        detailParams.leftMargin = dp(8);
+        LinearLayout.LayoutParams detailParams = new LinearLayout.LayoutParams(0, dp(32), 0.425f);
+        detailParams.leftMargin = dp(10);
         actions.addView(detail, detailParams);
+        actions.addView(new View(this), new LinearLayout.LayoutParams(0, dp(32), 0.075f));
 
         row.addView(body, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         card.addView(row);
@@ -3990,11 +4062,11 @@ public class MainActivity extends Activity {
         numberRow.setPadding(dp(42), 0, dp(144), 0);
 
         TextView numberLabel = new TextView(this);
-        numberLabel.setText("编号");
+        numberLabel.setText("编号：");
         numberLabel.setTextSize(13);
         numberLabel.setTextColor(0xff64748b);
         numberLabel.setGravity(Gravity.LEFT | Gravity.CENTER_VERTICAL);
-        numberRow.addView(numberLabel, new LinearLayout.LayoutParams(dp(30), ViewGroup.LayoutParams.MATCH_PARENT));
+        numberRow.addView(numberLabel, new LinearLayout.LayoutParams(dp(38), ViewGroup.LayoutParams.MATCH_PARENT));
 
         TextView numberValue = new TextView(this);
         numberValue.setText(number);
@@ -4017,11 +4089,11 @@ public class MainActivity extends Activity {
         nameRow.setPadding(dp(42), 0, dp(4), 0);
 
         TextView nameLabel = new TextView(this);
-        nameLabel.setText("名称");
+        nameLabel.setText("名称：");
         nameLabel.setTextSize(13);
         nameLabel.setTextColor(0xff64748b);
         nameLabel.setGravity(Gravity.LEFT | Gravity.CENTER_VERTICAL);
-        nameRow.addView(nameLabel, new LinearLayout.LayoutParams(dp(30), ViewGroup.LayoutParams.MATCH_PARENT));
+        nameRow.addView(nameLabel, new LinearLayout.LayoutParams(dp(38), ViewGroup.LayoutParams.MATCH_PARENT));
 
         TextView nameValue = new TextView(this);
         nameValue.setText(name);
@@ -4694,16 +4766,26 @@ public class MainActivity extends Activity {
                         mouldId = mould == null ? "" : mould.optString("id");
                     }
                     JSONObject mouldObj = device.optJSONObject("mould");
-                    boolean busyMould = mouldObj != null && isMouldBusyByWebRule(mouldObj);
-                    boolean offlineMould = mouldObj != null && !busyMould;
+                    String mouldKey = mouldStateKey(mouldId);
+                    Boolean previousBusy = mouldId.length() == 0 ? null : mouldBusyById.get(mouldKey);
+                    Boolean refreshedBusy = nestedDeviceMouldBusyState(mouldObj);
+                    Boolean currentBusy = refreshedBusy == null ? previousBusy : refreshedBusy;
+                    if (mouldId.length() > 0 && refreshedBusy != null) {
+                        if (Boolean.FALSE.equals(refreshedBusy) && Boolean.TRUE.equals(previousBusy)) {
+                            activeMouldUntil.put(mouldKey, now - 1);
+                        }
+                        mouldBusyById.put(mouldKey, refreshedBusy);
+                    }
+                    boolean busyMould = Boolean.TRUE.equals(currentBusy);
+                    boolean offlineMould = Boolean.FALSE.equals(currentBusy);
                     if (mouldId.length() > 0 && hasLivePressure(device)) {
                         if (busyMould) {
                             updateStaticPressure(device, false);
-                        } else {
-                            updateStaticPressure(device, offlineMould || canCaptureStaticAfterMouldOffline(mouldId, now));
+                        } else if (offlineMould || canCaptureStaticAfterMouldOffline(mouldId, now)) {
+                            updateStaticPressure(device, true);
                         }
-                    } else {
-                        updateStaticPressure(device, offlineMould || canCaptureStaticAfterMouldOffline(mouldId, now));
+                    } else if (offlineMould || canCaptureStaticAfterMouldOffline(mouldId, now)) {
+                        updateStaticPressure(device, true);
                     }
                     String key = deviceKey(device);
                     if (key.length() == 0) {
@@ -5255,8 +5337,7 @@ public class MainActivity extends Activity {
         form.addView(label("纬度"));
         form.addView(latitude, fixedTop(ViewGroup.LayoutParams.MATCH_PARENT, dp(44), dp(6)));
 
-        EditText pointState = input("定位开关：0关 / 1开", false);
-        pointState.setText(gateway.optString("pointState"));
+        Spinner pointState = gatewayPointStateSpinner(gateway);
         form.addView(label("定位开关"));
         form.addView(pointState, fixedTop(ViewGroup.LayoutParams.MATCH_PARENT, dp(44), dp(6)));
 
@@ -5281,7 +5362,7 @@ public class MainActivity extends Activity {
         showStyledDialog(dialog);
     }
 
-    private void saveGatewayInfo(JSONObject gateway, Spinner dept, Spinner mould, EditText number, EditText name, EditText longitude, EditText latitude, EditText pointState, EditText remark) {
+    private void saveGatewayInfo(JSONObject gateway, Spinner dept, Spinner mould, EditText number, EditText name, EditText longitude, EditText latitude, Spinner pointState, EditText remark) {
         setLoading(true);
         try {
             JSONObject body = new JSONObject(gateway.toString());
@@ -5292,7 +5373,7 @@ public class MainActivity extends Activity {
             putSelected(body, "mouldId", mould);
             putText(body, "longitude", longitude);
             putText(body, "latitude", latitude);
-            putText(body, "pointState", pointState);
+            putSelectedInt(body, "pointState", pointState);
             new ApiTask("PUT", "/yujing/gateway", body.toString(), true, result -> {
                 setLoading(false);
                 if (!result.ok) {
@@ -5609,7 +5690,7 @@ public class MainActivity extends Activity {
 
         EditText longitude = null;
         EditText latitude = null;
-        EditText pointState = null;
+        Spinner pointState = null;
         if (currentTab == 2) {
             longitude = input("经度", false);
             longitude.setText(source == null ? "" : source.optString("longitude"));
@@ -5619,8 +5700,7 @@ public class MainActivity extends Activity {
             latitude.setText(source == null ? "" : source.optString("latitude"));
             form.addView(label("纬度"));
             form.addView(latitude, fixedTop(ViewGroup.LayoutParams.MATCH_PARENT, dp(44), dp(6)));
-            pointState = input("定位开关：0关 / 1开", false);
-            pointState.setText(source == null ? "" : source.optString("pointState"));
+            pointState = gatewayPointStateSpinner(source);
             form.addView(label("定位开关"));
             form.addView(pointState, fixedTop(ViewGroup.LayoutParams.MATCH_PARENT, dp(44), dp(6)));
         }
@@ -5645,7 +5725,7 @@ public class MainActivity extends Activity {
         final EditText upperInput = upper;
         final EditText longitudeInput = longitude;
         final EditText latitudeInput = latitude;
-        final EditText pointStateInput = pointState;
+        final Spinner pointStateInput = pointState;
         final EditText customerInput = customer;
 
         AlertDialog editDialog = new AlertDialog.Builder(this)
@@ -5665,7 +5745,7 @@ public class MainActivity extends Activity {
                         putPressureText(body, "upper", upperInput);
                         putText(body, "longitude", longitudeInput);
                         putText(body, "latitude", latitudeInput);
-                        putText(body, "pointState", pointStateInput);
+                        putSelectedInt(body, "pointState", pointStateInput);
                         if (customerInput != null) {
                             body.put("customer", customerInput.getText().toString().trim());
                         }
@@ -6277,6 +6357,36 @@ public class MainActivity extends Activity {
         return spinner;
     }
 
+    private Spinner gatewayPointStateSpinner(JSONObject gateway) {
+        List<OptionItem> states = new ArrayList<>();
+        String selectedValue = gatewayPointStateValue(gateway);
+        if (selectedValue.length() == 0) {
+            states.add(new OptionItem("", "未设置"));
+        }
+        states.add(new OptionItem("0", "关闭"));
+        states.add(new OptionItem("1", "开启"));
+        return spinner(states, selectedValue);
+    }
+
+    private String gatewayPointStateValue(JSONObject gateway) {
+        if (gateway == null || !gateway.has("pointState") || gateway.isNull("pointState")) {
+            return "";
+        }
+        Object value = gateway.opt("pointState");
+        if (value instanceof Number) {
+            int state = ((Number) value).intValue();
+            return state == 1 ? "1" : state == 0 ? "0" : "";
+        }
+        String text = String.valueOf(value).trim();
+        if ("1".equals(text) || "true".equalsIgnoreCase(text)) {
+            return "1";
+        }
+        if ("0".equals(text) || "false".equalsIgnoreCase(text)) {
+            return "0";
+        }
+        return "";
+    }
+
     private View spinnerSelectedView(List<OptionItem> items, int position) {
         OptionItem item = position >= 0 && position < items.size() ? items.get(position) : null;
         LinearLayout row = new LinearLayout(this);
@@ -6357,6 +6467,19 @@ public class MainActivity extends Activity {
                 body.put(key, item.value);
             } else {
                 body.remove(key);
+            }
+        }
+    }
+
+    private void putSelectedInt(JSONObject body, String key, Spinner spinner) throws Exception {
+        if (spinner == null) {
+            return;
+        }
+        Object selected = spinner.getSelectedItem();
+        if (selected instanceof OptionItem) {
+            OptionItem item = (OptionItem) selected;
+            if (item.value.length() > 0) {
+                body.put(key, Integer.parseInt(item.value));
             }
         }
     }
@@ -6735,10 +6858,12 @@ public class MainActivity extends Activity {
     private class OptionsTask extends AsyncTask<Void, Void, OptionsState> {
         private final JSONObject source;
         private final OptionsCallback callback;
+        private final boolean gatewayOptions;
 
         OptionsTask(JSONObject source, OptionsCallback callback) {
             this.source = source;
             this.callback = callback;
+            this.gatewayOptions = currentTab == 2;
         }
 
         @Override
@@ -6759,6 +6884,13 @@ public class MainActivity extends Activity {
                     appendMouldOptions(mouldJson.optJSONArray("rows"), state.moulds);
                 } catch (Exception ignored) {
                 }
+                if (gatewayOptions) {
+                    try {
+                        removeMouldsBoundToOtherGateways(state.moulds, source);
+                    } catch (Exception ignored) {
+                        // Keep the unfiltered list when binding data cannot be loaded.
+                    }
+                }
                 try {
                     JSONObject deviceJson = requestJson("GET", "/yujing/device/list?pageNum=1&pageSize=500", null, true);
                     appendDeviceInfoToMouldOptions(deviceJson.optJSONArray("rows"), state.moulds);
@@ -6769,10 +6901,20 @@ public class MainActivity extends Activity {
                 if (mouldId.length() == 0 && mould != null) {
                     mouldId = mould.optString("id");
                 }
-                if (mould != null && mouldId.length() > 0 && !containsOption(state.moulds, mouldId)) {
+                if (mouldId.length() > 0 && !containsOption(state.moulds, mouldId)) {
                     String label = mouldOptionLabel(mould);
+                    if (label.length() == 0) {
+                        try {
+                            JSONObject mouldDetailJson = requestJson("GET", "/yujing/mould/" + mouldId, null, true);
+                            label = mouldOptionLabel(mouldDetailJson.optJSONObject("data"));
+                        } catch (Exception ignored) {
+                        }
+                    }
+                    if (label.length() == 0) {
+                        label = "当前绑定模具";
+                    }
                     if (label.length() > 0) {
-                        state.moulds.add(new OptionItem(mouldId, label));
+                        state.moulds.add(Math.min(1, state.moulds.size()), new OptionItem(mouldId, label));
                     }
                 }
             }
@@ -6785,6 +6927,49 @@ public class MainActivity extends Activity {
                 return;
             }
             callback.done(optionsState);
+        }
+    }
+
+    private void removeMouldsBoundToOtherGateways(List<OptionItem> moulds, JSONObject currentGateway) throws Exception {
+        Set<String> occupiedMouldIds = new HashSet<>();
+        String currentGatewayId = valueOf(currentGateway, "id");
+        String currentMouldId = gatewayMouldId(currentGateway);
+        int pageSize = 200;
+        int pageNum = 1;
+        while (pageNum <= 100) {
+            JSONObject json = requestJson(
+                    "GET",
+                    "/yujing/gateway/list?pageNum=" + pageNum + "&pageSize=" + pageSize,
+                    null,
+                    true
+            );
+            JSONArray rows = json.optJSONArray("rows");
+            if (rows == null || rows.length() == 0) {
+                break;
+            }
+            for (int i = 0; i < rows.length(); i++) {
+                JSONObject gateway = rows.optJSONObject(i);
+                if (gateway == null || currentGatewayId.equals(valueOf(gateway, "id"))) {
+                    continue;
+                }
+                String mouldId = gatewayMouldId(gateway);
+                if (mouldId.length() > 0) {
+                    occupiedMouldIds.add(mouldId);
+                }
+            }
+            int total = json.optInt("total", -1);
+            if (rows.length() < pageSize || (total >= 0 && pageNum * pageSize >= total)) {
+                break;
+            }
+            pageNum++;
+        }
+        for (int i = moulds.size() - 1; i >= 0; i--) {
+            String mouldId = moulds.get(i).value;
+            if (mouldId.length() > 0
+                    && !mouldId.equals(currentMouldId)
+                    && occupiedMouldIds.contains(mouldId)) {
+                moulds.remove(i);
+            }
         }
     }
 

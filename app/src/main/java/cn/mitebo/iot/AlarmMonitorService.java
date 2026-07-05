@@ -49,6 +49,8 @@ public class AlarmMonitorService extends Service {
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private boolean polling = false;
+    private boolean requestInFlight = false;
+    private int pollGeneration = 0;
     private int activeAlarmCount = 0;
     private int audibleAlarmCount = 0;
     private Ringtone activeRingtone;
@@ -59,7 +61,6 @@ public class AlarmMonitorService extends Service {
         @Override
         public void run() {
             pollAlarmState();
-            handler.postDelayed(this, POLL_MS);
         }
     };
 
@@ -90,6 +91,7 @@ public class AlarmMonitorService extends Service {
     public int onStartCommand(Intent intent, int flags, int startId) {
         String token = token();
         if (isAppExpired() || token.length() == 0 || !backgroundAlarmMonitorEnabled()) {
+            invalidatePolling();
             clearAlarmNotification();
             stopAlarmSoundLoop();
             stopSelf();
@@ -98,25 +100,33 @@ public class AlarmMonitorService extends Service {
         try {
             startForeground(MONITOR_NOTIFICATION_ID, monitorNotification());
         } catch (SecurityException ignored) {
+            invalidatePolling();
             stopSelf();
             return START_NOT_STICKY;
         } catch (RuntimeException ignored) {
+            invalidatePolling();
             stopSelf();
             return START_NOT_STICKY;
         }
         if (!polling) {
             polling = true;
+            requestInFlight = false;
+            pollGeneration++;
             pollAlarmState();
-            handler.postDelayed(pollRunnable, POLL_MS);
         }
         return START_STICKY;
     }
 
     @Override
     public void onDestroy() {
-        handler.removeCallbacks(pollRunnable);
+        invalidatePolling();
         stopAlarmSoundLoop();
         super.onDestroy();
+    }
+
+    @Override
+    public void onTimeout(int startId, int fgsType) {
+        stopMonitoringService();
     }
 
     @Override
@@ -125,20 +135,23 @@ public class AlarmMonitorService extends Service {
     }
 
     private void pollAlarmState() {
-        String token = token();
-        if (isAppExpired() || token.length() == 0 || !backgroundAlarmMonitorEnabled()) {
-            clearAlarmNotification();
-            stopAlarmSoundLoop();
-            stopSelf();
+        if (!polling || requestInFlight) {
+            return;
+        }
+        String tokenSnapshot = token();
+        if (isAppExpired() || tokenSnapshot.length() == 0 || !backgroundAlarmMonitorEnabled()) {
+            stopMonitoringService();
             return;
         }
         // 后台轮询只读取告警列表，不刷新设备压力，避免后台任务影响静止压力采集和锁定。
+        requestInFlight = true;
+        int generation = pollGeneration;
         new Thread(() -> {
             int count = activeAlarmCount;
             int audible = audibleAlarmCount;
             boolean ok = false;
             try {
-                JSONArray rows = fetchAlarmRows(token);
+                JSONArray rows = fetchAlarmRows(tokenSnapshot);
                 count = countActiveAlarms(rows);
                 audible = countAudibleAlarms(rows);
                 ok = true;
@@ -148,13 +161,49 @@ public class AlarmMonitorService extends Service {
             int finalAudible = audible;
             boolean finalOk = ok;
             handler.post(() -> {
+                if (generation != pollGeneration) {
+                    return;
+                }
+                requestInFlight = false;
+                if (!polling) {
+                    return;
+                }
+                String currentToken = token();
+                if (isAppExpired() || currentToken.length() == 0 || !backgroundAlarmMonitorEnabled()) {
+                    stopMonitoringService();
+                    return;
+                }
+                if (!tokenSnapshot.equals(currentToken)) {
+                    handler.removeCallbacks(pollRunnable);
+                    handler.post(pollRunnable);
+                    return;
+                }
                 if (finalOk) {
                     applyAlarmCount(finalCount, finalAudible);
-                } else {
-                    applyAlarmCount(0, 0);
                 }
+                handler.removeCallbacks(pollRunnable);
+                handler.postDelayed(pollRunnable, POLL_MS);
             });
-        }).start();
+        }, "alarm-monitor-poll").start();
+    }
+
+    private void invalidatePolling() {
+        polling = false;
+        requestInFlight = false;
+        pollGeneration++;
+        handler.removeCallbacks(pollRunnable);
+    }
+
+    private void stopMonitoringService() {
+        invalidatePolling();
+        clearAlarmNotification();
+        stopAlarmSoundLoop();
+        if (Build.VERSION.SDK_INT >= 24) {
+            stopForeground(STOP_FOREGROUND_REMOVE);
+        } else {
+            stopForeground(true);
+        }
+        stopSelf();
     }
 
     private JSONArray fetchAlarmRows(String token) throws Exception {
