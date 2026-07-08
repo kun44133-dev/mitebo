@@ -4,6 +4,7 @@ import android.app.Activity;
 import android.app.AlertDialog;
 import android.app.DatePickerDialog;
 import android.content.DialogInterface;
+import android.content.SharedPreferences;
 import android.widget.CompoundButton;
 import android.app.Notification;
 import android.app.NotificationChannel;
@@ -81,6 +82,9 @@ public class MainActivity extends Activity {
     private static final String PREF_BACKGROUND_ALARM_MONITOR = "background_alarm_monitor";
     private static final String PREF_PRESSURE_UNIT = "pressure_unit";
     private static final String PREF_OFFLINE_ALARM_MOULD_IDS = "offline_alarm_mould_ids";
+    private static final String PREF_LOWER_LIMIT_BACKUP_PREFIX = "lower_limit_backup_";
+    private static final String GITHUB_LATEST_RELEASE_URL =
+            "https://api.github.com/repos/kun44133-dev/mitebo/releases/latest";
     private static final String APP_EXPIRE_AT = "2026-08-31 23:59:59";
     private static final int REQ_ALARM_SOUND = 310;
     private static final int BLUE = 0xff1f6feb;
@@ -532,7 +536,7 @@ public class MainActivity extends Activity {
         panel.addView(tip, topMargin(dp(14)));
 
         TextView version = new TextView(this);
-        version.setText("作者 kunkun  版本号 1.0.52");
+        version.setText("作者 kunkun  版本号 1.0.59");
         version.setTextSize(13);
         version.setTextColor(0xffb7c9d9);
         version.setGravity(Gravity.CENTER);
@@ -2419,7 +2423,11 @@ public class MainActivity extends Activity {
         preferenceCard.addView(settingsActionRow("压力单位", "切换压力单位", unitSpinner));
         content.addView(preferenceCard, topMargin(dp(8)));
 
-        LinearLayout appCard = settingsCard("账号", "当前登录账号与退出");
+        LinearLayout appCard = settingsCard("应用与账号", "版本更新、当前账号与退出");
+        TextView checkUpdate = settingsAction("检查更新");
+        checkUpdate.setOnClickListener(v -> checkForAppUpdate(checkUpdate));
+        appCard.addView(settingsActionRow("当前版本", currentAppVersionName(), checkUpdate), topMargin(dp(6)));
+        appCard.addView(settingsDivider());
         appCard.addView(meta("当前账号：" + getSharedPreferences(PREFS, MODE_PRIVATE).getString("saved_username", "-")), topMargin(dp(6)));
         TextView exit = settingsAction("退出登录");
         exit.setTextColor(RED);
@@ -2432,6 +2440,210 @@ public class MainActivity extends Activity {
         });
         appCard.addView(exit, fixedTop(ViewGroup.LayoutParams.MATCH_PARENT, dp(38), dp(8)));
         content.addView(appCard, topMargin(dp(8)));
+
+        LinearLayout dataCard = settingsCard("数据与缓存", "清理所有账号的本地业务缓存");
+        TextView clearData = settingsAction("清理数据缓存");
+        clearData.setTextColor(RED);
+        clearData.setOnClickListener(v -> confirmClearAllAccountCachedData());
+        dataCard.addView(clearData, fixedTop(ViewGroup.LayoutParams.MATCH_PARENT, dp(38), dp(8)));
+        content.addView(dataCard, topMargin(dp(8)));
+    }
+
+    private String currentAppVersionName() {
+        try {
+            android.content.pm.PackageInfo info = getPackageManager().getPackageInfo(getPackageName(), 0);
+            return info.versionName == null ? "-" : info.versionName;
+        } catch (Exception ignored) {
+            return "-";
+        }
+    }
+
+    private void checkForAppUpdate(TextView action) {
+        action.setEnabled(false);
+        action.setText("检查中");
+        new AsyncTask<Void, Void, UpdateInfo>() {
+            @Override
+            protected UpdateInfo doInBackground(Void... voids) {
+                return fetchLatestRelease();
+            }
+
+            @Override
+            protected void onPostExecute(UpdateInfo update) {
+                if (!isActivityUsable()) {
+                    return;
+                }
+                action.setEnabled(true);
+                action.setText("检查更新");
+                if (update.error.length() > 0) {
+                    toast(update.error);
+                    return;
+                }
+                if (compareVersions(update.version, currentAppVersionName()) <= 0) {
+                    toast("当前已是最新版本");
+                    return;
+                }
+                showUpdateDialog(update);
+            }
+        }.execute();
+    }
+
+    private UpdateInfo fetchLatestRelease() {
+        UpdateInfo update = new UpdateInfo();
+        HttpURLConnection connection = null;
+        try {
+            connection = (HttpURLConnection) new URL(GITHUB_LATEST_RELEASE_URL).openConnection();
+            connection.setConnectTimeout(12000);
+            connection.setReadTimeout(12000);
+            connection.setRequestProperty("Accept", "application/vnd.github+json");
+            connection.setRequestProperty("User-Agent", "Mitebo-Android-Updater");
+            int responseCode = connection.getResponseCode();
+            if (responseCode < 200 || responseCode >= 300) {
+                update.error = "检查更新失败：" + responseCode;
+                return update;
+            }
+            JSONObject release = new JSONObject(readAll(connection.getInputStream()));
+            update.version = release.optString("tag_name").replaceFirst("^[vV]", "");
+            update.notes = release.optString("body", "");
+            JSONArray assets = release.optJSONArray("assets");
+            if (assets != null) {
+                for (int i = 0; i < assets.length(); i++) {
+                    JSONObject asset = assets.optJSONObject(i);
+                    String name = asset == null ? "" : asset.optString("name");
+                    if (name.toLowerCase(java.util.Locale.ROOT).endsWith(".apk")) {
+                        update.downloadUrl = asset.optString("browser_download_url");
+                        break;
+                    }
+                }
+            }
+            if (update.version.length() == 0 || update.downloadUrl.length() == 0) {
+                update.error = "最新版本未提供 APK 安装包";
+            }
+        } catch (Exception ignored) {
+            update.error = "检查更新失败，请检查网络";
+        } finally {
+            if (connection != null) {
+                connection.disconnect();
+            }
+        }
+        return update;
+    }
+
+    private int compareVersions(String left, String right) {
+        String[] leftParts = left == null ? new String[0] : left.split("\\.");
+        String[] rightParts = right == null ? new String[0] : right.split("\\.");
+        int count = Math.max(leftParts.length, rightParts.length);
+        for (int i = 0; i < count; i++) {
+            int leftValue = i < leftParts.length ? integerPrefix(leftParts[i]) : 0;
+            int rightValue = i < rightParts.length ? integerPrefix(rightParts[i]) : 0;
+            if (leftValue != rightValue) {
+                return leftValue < rightValue ? -1 : 1;
+            }
+        }
+        return 0;
+    }
+
+    private int integerPrefix(String value) {
+        if (value == null) {
+            return 0;
+        }
+        String digits = value.replaceFirst("^(\\d+).*$", "$1");
+        if (!digits.matches("\\d+")) {
+            return 0;
+        }
+        try {
+            return Integer.parseInt(digits);
+        } catch (NumberFormatException ignored) {
+            return 0;
+        }
+    }
+
+    private void showUpdateDialog(UpdateInfo update) {
+        String notes = update.notes.trim();
+        if (notes.length() > 800) {
+            notes = notes.substring(0, 800) + "...";
+        }
+        String message = "发现新版本 " + update.version
+                + (notes.length() == 0 ? "" : "\n\n" + notes);
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle("发现新版本")
+                .setMessage(message)
+                .setNegativeButton("稍后更新", null)
+                .setPositiveButton("下载更新", (d, which) -> {
+                    try {
+                        startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(update.downloadUrl)));
+                    } catch (Exception ignored) {
+                        toast("无法打开下载链接");
+                    }
+                })
+                .create();
+        dialog.setOnShowListener(d -> styleDialogButtons(dialog));
+        showStyledDialog(dialog);
+    }
+
+    private void confirmClearAllAccountCachedData() {
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle("清理数据缓存")
+                .setMessage("将清除所有账号的监控设备、静止压力、告警记录和下限备份，并退出当前登录。已保存的账号和密码不会被清除。")
+                .setNegativeButton("取消", null)
+                .setPositiveButton("确认清理", (d, which) -> clearAllAccountCachedData())
+                .create();
+        dialog.setOnShowListener(d -> {
+            dialog.getButton(DialogInterface.BUTTON_POSITIVE).setTextColor(RED);
+            styleDialogButtons(dialog);
+        });
+        showStyledDialog(dialog);
+    }
+
+    private void clearAllAccountCachedData() {
+        stopAlarmMonitorService();
+        resetAlarmSessionState();
+        resetPressureStateCaches();
+        refreshHandler.removeCallbacks(pressureRefresh);
+        refreshHandler.removeCallbacks(alarmRefresh);
+
+        SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+        String alarmSoundUri = prefs.getString(PREF_ALARM_SOUND_URI, null);
+        boolean alarmSound = prefs.getBoolean(PREF_ALARM_SOUND_ENABLED, true);
+        boolean alarmVibration = prefs.getBoolean(PREF_ALARM_VIBRATION_ENABLED, true);
+        boolean offlineAlarmSound = prefs.getBoolean(PREF_OFFLINE_MOULD_ALARM_SOUND, false);
+        boolean backgroundMonitor = prefs.getBoolean(PREF_BACKGROUND_ALARM_MONITOR, false);
+        String pressureUnit = prefs.getString(PREF_PRESSURE_UNIT, "bar");
+        String savedAccounts = prefs.getString("saved_accounts", "");
+        String savedUsername = prefs.getString("saved_username", "");
+        String savedPassword = prefs.getString("saved_password", "");
+        boolean rememberPassword = prefs.getBoolean("remember_password", false);
+
+        SharedPreferences.Editor editor = prefs.edit().clear()
+                .putBoolean(PREF_ALARM_SOUND_ENABLED, alarmSound)
+                .putBoolean(PREF_ALARM_VIBRATION_ENABLED, alarmVibration)
+                .putBoolean(PREF_OFFLINE_MOULD_ALARM_SOUND, offlineAlarmSound)
+                .putBoolean(PREF_BACKGROUND_ALARM_MONITOR, backgroundMonitor)
+                .putString(PREF_PRESSURE_UNIT, pressureUnit)
+                .putString("saved_accounts", savedAccounts)
+                .putString("saved_username", savedUsername)
+                .putString("saved_password", savedPassword)
+                .putBoolean("remember_password", rememberPassword);
+        if (alarmSoundUri != null) {
+            editor.putString(PREF_ALARM_SOUND_URI, alarmSoundUri);
+        }
+        editor.apply();
+
+        token = null;
+        macSearchInput = null;
+        expandedMouldIds.clear();
+        expandedAlarmIds.clear();
+        expandedGatewayIds.clear();
+        mouldDropdownDeviceCache.clear();
+        offlineMouldMode = false;
+        gatewayManagementMode = false;
+        alarmHistoryAllMode = false;
+        alarmUnclearedOnly = false;
+        alarmDateManuallySelected = false;
+        alarmDateFilter = "";
+        openedDeviceSwipeCard = null;
+        currentTab = 2;
+        toast("数据缓存已清理，账号密码已保留");
+        showLogin();
     }
 
     private void addSettingsHeader() {
@@ -3129,16 +3341,30 @@ public class MainActivity extends Activity {
             return;
         }
         restoreStaticPressureLock(key);
-        // 模具在线生产时只记录“见过动态压力”，不采集静止压力，避免动态压力把已锁定值顶掉。
+        Double lockedPressure = existingStaticPressure(device);
+        boolean differsFromLocked = lockedPressure == null
+                || Math.abs(pressure - lockedPressure) >= STATIC_PRESSURE_STABLE_DELTA;
+        boolean pendingCapture = Boolean.TRUE.equals(dynamicSeenByDevice.get(key))
+                || staticPressurePending(key);
+        // 在线模具也按传感器独立判断稳定性，避免同一模具内的 0 压力传感器阻断其他传感器采集。
         if (!allowOfflineCapture) {
-            dynamicSeenByDevice.put(key, true);
-            setStaticPressurePending(key, true);
-            stableCandidatePressureByDevice.remove(key);
-            stableSinceByDevice.remove(key);
+            Double previous = lastPressureByDevice.put(key, pressure);
+            boolean pressureMoved = previous != null
+                    && Math.abs(pressure - previous) >= STATIC_PRESSURE_STABLE_DELTA;
+            if (pressureMoved || (!pendingCapture && differsFromLocked)) {
+                beginStaticPressureCapture(key, pressure);
+                return;
+            }
+            if (!pendingCapture) {
+                return;
+            }
+        } else if (!pendingCapture && lockedPressure != null && differsFromLocked) {
+            // 旧静止压力（包括 0）与当前离线压力不同，重新等待稳定后更新，无需清除缓存。
+            beginStaticPressureCapture(key, pressure);
             return;
         }
         // 已采集的静止压力保持锁定；只有经历过生产动态后再次下线，才开启下一轮静止采集。
-        boolean pendingCapture = Boolean.TRUE.equals(dynamicSeenByDevice.get(key)) || staticPressurePending(key);
+        pendingCapture = Boolean.TRUE.equals(dynamicSeenByDevice.get(key)) || staticPressurePending(key);
         if (Boolean.TRUE.equals(staticPressureCapturedByDevice.get(key))) {
             if (pendingCapture) {
                 staticPressureCapturedByDevice.put(key, false);
@@ -3171,6 +3397,14 @@ public class MainActivity extends Activity {
                 setStaticPressureViewText(standardView, pressureWithUnit(trimNumber(pressure)));
             }
         }
+    }
+
+    private void beginStaticPressureCapture(String key, Double pressure) {
+        dynamicSeenByDevice.put(key, true);
+        setStaticPressurePending(key, true);
+        staticPressureCapturedByDevice.put(key, false);
+        stableCandidatePressureByDevice.put(key, pressure);
+        stableSinceByDevice.put(key, System.currentTimeMillis());
     }
 
     private void restoreStaticPressureLock(String key) {
@@ -4594,6 +4828,7 @@ public class MainActivity extends Activity {
         LinearLayout form = new LinearLayout(this);
         form.setOrientation(LinearLayout.VERTICAL);
         form.setPadding(dp(14), dp(6), dp(14), dp(8));
+        final boolean offlineMould = mould.optBoolean("_offlinePressure") || offlineMouldMode;
 
         List<OptionItem> sensors = new ArrayList<>();
         List<JSONObject> devices = new ArrayList<>();
@@ -4615,6 +4850,12 @@ public class MainActivity extends Activity {
         TextView pressure = meta("实时压力：-");
         TextView standard = meta("静止压力：-");
         TextView battery = meta("电池电量：-");
+        ImageView lowerMute = lowerLimitMuteButton();
+        Map<String, String> lowerDraftBySensor = new HashMap<>();
+        Map<String, String> originalLowerBySensor = new HashMap<>();
+        Set<String> mutedSensorKeys = new HashSet<>();
+        final String[] selectedSensorKey = {""};
+        final JSONObject[] selectedDevice = {null};
 
         form.addView(label("传感器"));
         form.addView(sensorSpinner, fixedTop(ViewGroup.LayoutParams.MATCH_PARENT, dp(44), dp(2)));
@@ -4626,20 +4867,99 @@ public class MainActivity extends Activity {
         form.addView(label("报警上限 (" + pressureUnitLabel() + ")"));
         form.addView(upper, fixedTop(ViewGroup.LayoutParams.MATCH_PARENT, dp(44), dp(4)));
 
-        sensorSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+        LinearLayout muteAction = new LinearLayout(this);
+        muteAction.setGravity(Gravity.LEFT | Gravity.CENTER_VERTICAL);
+        muteAction.addView(lowerMute, new LinearLayout.LayoutParams(dp(40), dp(40)));
+        form.addView(muteAction, topMargin(dp(8)));
+
+        lowerMute.setOnClickListener(v -> {
+            JSONObject device = selectedDevice[0];
+            String key = selectedSensorKey[0];
+            if (device == null || key.length() == 0) {
+                toast("请选择要修改的传感器");
+                return;
+            }
+            if (mutedSensorKeys.contains(key)) {
+                String original = originalLowerBySensor.get(key);
+                if (original == null || original.length() == 0 || isZeroPressureInput(original)) {
+                    original = storedLowerLimitBackup(device);
+                }
+                if (original.length() == 0 || isZeroPressureInput(original)) {
+                    toast("没有可恢复的原下限值");
+                    return;
+                }
+                lower.setText(original);
+                lowerDraftBySensor.put(key, original);
+                mutedSensorKeys.remove(key);
+                updateLowerLimitInputState(lower, false, original);
+                updateLowerLimitMuteButton(lowerMute, false, offlineMould || isZeroRealtimePressure(device));
+                toast("该传感器报警已经开启！");
+                return;
+            }
+            if (!offlineMould && !isZeroRealtimePressure(device)) {
+                toast("仅实时压力为0的传感器可归零下限");
+                return;
+            }
+            String original = lower.getText().toString().trim();
+            if (original.length() == 0 || isZeroPressureInput(original)) {
+                toast("当前下限已为0，暂无可恢复值");
+                return;
+            }
+            originalLowerBySensor.put(key, original);
+            saveLowerLimitBackup(device, original);
+            lowerDraftBySensor.put(key, original);
+            mutedSensorKeys.add(key);
+            updateLowerLimitInputState(lower, true, original);
+            updateLowerLimitMuteButton(lowerMute, true, true);
+            toast("该传感器报警被屏蔽！");
+        });
+
+        AdapterView.OnItemSelectedListener sensorListener = new AdapterView.OnItemSelectedListener() {
             @Override
             public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
+                if (selectedSensorKey[0].length() > 0) {
+                    lowerDraftBySensor.put(selectedSensorKey[0], lower.getText().toString().trim());
+                }
                 JSONObject device = position >= 0 && position < devices.size() ? devices.get(position) : null;
                 fillMouldLimitSensorFields(device, lower, upper, pressure, standard, battery);
+                selectedDevice[0] = device;
+                String key = device == null ? "" : deviceKey(device);
+                selectedSensorKey[0] = key;
+                if (device == null || key.length() == 0) {
+                    updateLowerLimitInputState(lower, false, "");
+                    updateLowerLimitMuteButton(lowerMute, false, false);
+                    return;
+                }
+                String backup = storedLowerLimitBackup(device);
+                String serverLower = lower.getText().toString().trim();
+                if (!originalLowerBySensor.containsKey(key)) {
+                    originalLowerBySensor.put(key, backup.length() > 0 ? backup : serverLower);
+                }
+                String draft = lowerDraftBySensor.get(key);
+                if (draft != null) {
+                    lower.setText(draft);
+                }
+                boolean muted = mutedSensorKeys.contains(key)
+                        || (draft == null && isZeroPressureInput(serverLower) && backup.length() > 0);
+                if (muted) {
+                    mutedSensorKeys.add(key);
+                    String original = originalLowerBySensor.get(key);
+                    updateLowerLimitInputState(lower, true, original == null ? backup : original);
+                } else {
+                    mutedSensorKeys.remove(key);
+                    updateLowerLimitInputState(lower, false, lower.getText().toString().trim());
+                }
+                updateLowerLimitMuteButton(lowerMute, muted, muted || offlineMould || isZeroRealtimePressure(device));
             }
 
             @Override
             public void onNothingSelected(AdapterView<?> parent) {
             }
-        });
+        };
+        sensorSpinner.setOnItemSelectedListener(sensorListener);
         if (devices.size() > 1) {
             sensorSpinner.setSelection(1);
-            fillMouldLimitSensorFields(devices.get(1), lower, upper, pressure, standard, battery);
+            sensorListener.onItemSelected(sensorSpinner, null, 1, 0);
         }
 
         AlertDialog dialog = new AlertDialog.Builder(this)
@@ -4653,7 +4973,11 @@ public class MainActivity extends Activity {
                         toast("请选择要修改的传感器");
                         return;
                     }
-                    saveMouldSensorLimits(device, lower.getText().toString().trim(), upper.getText().toString().trim());
+                    String key = deviceKey(device);
+                    String lowerToSave = mutedSensorKeys.contains(key)
+                            ? "0"
+                            : lower.getText().toString().trim();
+                    saveMouldSensorLimits(device, lowerToSave, upper.getText().toString().trim());
                 })
                 .create();
         dialog.setOnShowListener(d -> {
@@ -4664,6 +4988,85 @@ public class MainActivity extends Activity {
             styleDialogButtons(dialog);
         });
         showStyledDialog(dialog);
+    }
+
+    private void updateLowerLimitInputState(EditText input, boolean muted, String displayValue) {
+        if (displayValue != null) {
+            input.setText(displayValue);
+        }
+        input.setEnabled(!muted);
+        input.setFocusable(!muted);
+        input.setFocusableInTouchMode(!muted);
+        input.setTextColor(muted ? MUTED : INK);
+        input.setBackground(roundedStroke(
+                muted ? 0xffeef2f6 : 0xfffbfdff,
+                14,
+                muted ? 0xffcbd5e1 : LINE
+        ));
+    }
+
+    private ImageView lowerLimitMuteButton() {
+        ImageView button = new ImageView(this);
+        button.setPadding(dp(4), dp(4), dp(4), dp(4));
+        button.setBackground(gradient(BLUE, CYAN, 999));
+        updateLowerLimitMuteButton(button, false, false);
+        return button;
+    }
+
+    private void updateLowerLimitMuteButton(ImageView button, boolean muted, boolean enabled) {
+        button.setImageResource(muted ? R.drawable.ic_volume_off : R.drawable.ic_volume_on);
+        button.clearColorFilter();
+        button.setEnabled(enabled);
+        button.setAlpha(enabled ? 1f : 0.45f);
+        button.setContentDescription(muted ? "恢复传感器报警下限" : "将零压力传感器报警下限归零");
+        if (Build.VERSION.SDK_INT >= 26) {
+            button.setTooltipText(button.getContentDescription());
+        }
+    }
+
+    private boolean isZeroRealtimePressure(JSONObject device) {
+        Double pressure = device == null ? null : pressureToBar(device.optString("pressure"));
+        if (pressure == null) {
+            return false;
+        }
+        double displayPressure = convertBarToPressureUnit(pressure, pressureUnitLabel());
+        return Math.abs(displayPressure) < 0.005d;
+    }
+
+    private boolean isZeroPressureInput(String value) {
+        Double pressure = pressureInputToBar(value);
+        return pressure != null && Math.abs(pressure) < 0.0001d;
+    }
+
+    private String lowerLimitBackupKey(JSONObject device) {
+        String key = pressureStateKey(device);
+        return key.length() == 0 ? "" : PREF_LOWER_LIMIT_BACKUP_PREFIX + key;
+    }
+
+    private void saveLowerLimitBackup(JSONObject device, String displayValue) {
+        String key = lowerLimitBackupKey(device);
+        if (key.length() == 0 || displayValue == null || displayValue.trim().length() == 0) {
+            return;
+        }
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                .putString(key, pressureInputToStorageValue(displayValue))
+                .apply();
+    }
+
+    private String storedLowerLimitBackup(JSONObject device) {
+        String key = lowerLimitBackupKey(device);
+        if (key.length() == 0) {
+            return "";
+        }
+        String stored = getSharedPreferences(PREFS, MODE_PRIVATE).getString(key, "");
+        return stored.length() == 0 ? "" : pressureInputValue(stored);
+    }
+
+    private void clearLowerLimitBackup(JSONObject device) {
+        String key = lowerLimitBackupKey(device);
+        if (key.length() > 0) {
+            getSharedPreferences(PREFS, MODE_PRIVATE).edit().remove(key).apply();
+        }
     }
 
     private void fillMouldLimitSensorFields(JSONObject device, EditText lower, EditText upper, TextView pressure, TextView standard, TextView battery) {
@@ -4724,12 +5127,18 @@ public class MainActivity extends Activity {
                 try {
                     JSONObject json = new JSONObject(result.body);
                     if (json.optInt("code", 200) == 200) {
+                        if (!isZeroPressureInput(lower)) {
+                            clearLowerLimitBackup(device);
+                        }
                         toast("上下限已保存");
                         loadList(false);
                     } else {
                         toast(json.optString("msg", "保存失败"));
                     }
                 } catch (Exception e) {
+                    if (!isZeroPressureInput(lower)) {
+                        clearLowerLimitBackup(device);
+                    }
                     toast("上下限已保存");
                     loadList(false);
                 }
@@ -6829,6 +7238,13 @@ public class MainActivity extends Activity {
         boolean ok;
         String body;
         String message;
+    }
+
+    private static class UpdateInfo {
+        String version = "";
+        String notes = "";
+        String downloadUrl = "";
+        String error = "";
     }
 
     private interface OptionsCallback {
