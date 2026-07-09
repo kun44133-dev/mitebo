@@ -4,6 +4,25 @@
 
 ## 2026-07-09
 
+### 打包版本 1.0.61
+
+- `versionCode` 更新为 `61`，`versionName` 和登录页版本号更新为 `1.0.61`。
+- 本次安装包包含 App 内下载并安装更新、设置页顶部精简和压力单位下拉框宽度统一。
+
+### 设置页顶部精简
+
+- 去除设置页面顶部“设置”和“管理告警、单位和账号”说明文字。
+- 设置功能卡片上移，减少顶部空白。
+- 压力单位下拉框宽度调整为与铃声选择按钮一致。
+- 影响文件：`app/src/main/java/cn/mitebo/iot/MainActivity.java`。
+
+### App 内下载并安装更新
+
+- 检查到 GitHub Releases 新版本后，“下载更新”改为“下载并安装”。
+- 点击后使用 Android 系统下载器在 App 内下载 APK，下载完成自动调起系统安装界面，不再跳转到浏览器下载页面。
+- Android 8 及以上如果未允许本 App 安装更新包，会先引导用户打开“安装未知应用”权限设置。
+- 影响文件：`app/src/main/java/cn/mitebo/iot/MainActivity.java`、`app/src/main/AndroidManifest.xml`。
+
 ### 打包版本 1.0.60
 
 - `versionCode` 更新为 `60`，`versionName` 和登录页版本号更新为 `1.0.60`。

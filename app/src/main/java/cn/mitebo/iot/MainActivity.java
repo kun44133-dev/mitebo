@@ -3,7 +3,11 @@ package cn.mitebo.iot;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.app.DatePickerDialog;
+import android.app.DownloadManager;
+import android.content.BroadcastReceiver;
+import android.content.Context;
 import android.content.DialogInterface;
+import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.widget.CompoundButton;
 import android.app.Notification;
@@ -23,8 +27,10 @@ import android.net.Uri;
 import android.os.AsyncTask;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
+import android.provider.Settings;
 import android.os.VibrationEffect;
 import android.os.Vibrator;
 import android.text.Editable;
@@ -161,6 +167,20 @@ public class MainActivity extends Activity {
     private Ringtone activeAlarmRingtone;
     private boolean alarmSoundLooping = false;
     private boolean alarmVibrationLooping = false;
+    private long updateDownloadId = -1L;
+    private boolean updateDownloadReceiverRegistered = false;
+    private final BroadcastReceiver updateDownloadReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            if (intent == null || !DownloadManager.ACTION_DOWNLOAD_COMPLETE.equals(intent.getAction())) {
+                return;
+            }
+            long completedId = intent.getLongExtra(DownloadManager.EXTRA_DOWNLOAD_ID, -1L);
+            if (completedId == updateDownloadId) {
+                installDownloadedUpdate(completedId);
+            }
+        }
+    };
     private final List<String> expandedMouldIds = new ArrayList<>();
     private final List<String> expandedAlarmIds = new ArrayList<>();
     private final List<String> expandedGatewayIds = new ArrayList<>();
@@ -246,6 +266,7 @@ public class MainActivity extends Activity {
             return;
         }
         ensureAlarmChannel();
+        registerUpdateDownloadReceiver();
         requestNotificationPermissionIfNeeded();
         applyDebugBadgeIntent(getIntent());
 
@@ -314,6 +335,7 @@ public class MainActivity extends Activity {
         refreshHandler.removeCallbacks(pressureRefresh);
         refreshHandler.removeCallbacks(alarmRefresh);
         stopAlarmSoundLoop();
+        unregisterUpdateDownloadReceiver();
         super.onDestroy();
     }
 
@@ -537,7 +559,7 @@ public class MainActivity extends Activity {
         panel.addView(tip, topMargin(dp(14)));
 
         TextView version = new TextView(this);
-        version.setText("作者 kunkun  版本号 1.0.60");
+        version.setText("作者 kunkun  版本号 1.0.61");
         version.setTextSize(13);
         version.setTextColor(0xffb7c9d9);
         version.setGravity(Gravity.CENTER);
@@ -2330,8 +2352,6 @@ public class MainActivity extends Activity {
     }
 
     private void renderSettingsPage() {
-        addSettingsHeader();
-
         LinearLayout preferenceCard = settingsCard("偏好设置", "报警、后台轮询与压力单位");
         preferenceCard.addView(settingsSwitchRow(
                 "报警声音",
@@ -2459,6 +2479,31 @@ public class MainActivity extends Activity {
         }
     }
 
+    private void registerUpdateDownloadReceiver() {
+        if (updateDownloadReceiverRegistered) {
+            return;
+        }
+        IntentFilter filter = new IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE);
+        if (Build.VERSION.SDK_INT >= 33) {
+            registerReceiver(updateDownloadReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
+        } else {
+            registerReceiver(updateDownloadReceiver, filter);
+        }
+        updateDownloadReceiverRegistered = true;
+    }
+
+    private void unregisterUpdateDownloadReceiver() {
+        if (!updateDownloadReceiverRegistered) {
+            return;
+        }
+        try {
+            unregisterReceiver(updateDownloadReceiver);
+        } catch (IllegalArgumentException ignored) {
+            // Receiver may already be unregistered if Activity teardown races with system cleanup.
+        }
+        updateDownloadReceiverRegistered = false;
+    }
+
     private void checkForAppUpdate(TextView action) {
         action.setEnabled(false);
         action.setText("检查中");
@@ -2569,16 +2614,81 @@ public class MainActivity extends Activity {
                 .setTitle("发现新版本")
                 .setMessage(message)
                 .setNegativeButton("稍后更新", null)
-                .setPositiveButton("下载更新", (d, which) -> {
+                .setPositiveButton("下载并安装", (d, which) -> downloadAndInstallUpdate(update))
+                .create();
+        dialog.setOnShowListener(d -> styleDialogButtons(dialog));
+        showStyledDialog(dialog);
+    }
+
+    private void downloadAndInstallUpdate(UpdateInfo update) {
+        if (Build.VERSION.SDK_INT >= 26 && !getPackageManager().canRequestPackageInstalls()) {
+            showInstallPermissionDialog();
+            return;
+        }
+        DownloadManager manager = (DownloadManager) getSystemService(DOWNLOAD_SERVICE);
+        if (manager == null || update.downloadUrl.length() == 0) {
+            toast("无法启动更新下载");
+            return;
+        }
+        try {
+            String fileName = "mitebo-" + update.version + ".apk";
+            DownloadManager.Request request = new DownloadManager.Request(Uri.parse(update.downloadUrl));
+            request.setTitle("密特堡压力监测 " + update.version);
+            request.setDescription("正在下载更新安装包");
+            request.setMimeType("application/vnd.android.package-archive");
+            request.setAllowedOverMetered(true);
+            request.setAllowedOverRoaming(true);
+            request.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
+            request.setDestinationInExternalFilesDir(this, Environment.DIRECTORY_DOWNLOADS, fileName);
+            updateDownloadId = manager.enqueue(request);
+            toast("已开始下载，完成后将打开安装界面");
+        } catch (Exception ignored) {
+            toast("更新下载启动失败");
+        }
+    }
+
+    private void showInstallPermissionDialog() {
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle("允许安装更新")
+                .setMessage("需要先允许本 App 安装更新包。打开系统设置并允许后，请返回 App 再次点击下载更新。")
+                .setNegativeButton("取消", null)
+                .setPositiveButton("去设置", (d, which) -> {
                     try {
-                        startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(update.downloadUrl)));
+                        Intent intent = new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                                Uri.parse("package:" + getPackageName()));
+                        startActivity(intent);
                     } catch (Exception ignored) {
-                        toast("无法打开下载链接");
+                        toast("无法打开安装权限设置");
                     }
                 })
                 .create();
         dialog.setOnShowListener(d -> styleDialogButtons(dialog));
         showStyledDialog(dialog);
+    }
+
+    private void installDownloadedUpdate(long downloadId) {
+        DownloadManager manager = (DownloadManager) getSystemService(DOWNLOAD_SERVICE);
+        if (manager == null) {
+            toast("无法读取更新安装包");
+            return;
+        }
+        Uri apkUri = manager.getUriForDownloadedFile(downloadId);
+        if (apkUri == null) {
+            toast("更新下载失败，请重新检查更新");
+            return;
+        }
+        if (Build.VERSION.SDK_INT >= 26 && !getPackageManager().canRequestPackageInstalls()) {
+            showInstallPermissionDialog();
+            return;
+        }
+        try {
+            Intent intent = new Intent(Intent.ACTION_VIEW);
+            intent.setDataAndType(apkUri, "application/vnd.android.package-archive");
+            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            startActivity(intent);
+        } catch (Exception ignored) {
+            toast("无法打开安装界面");
+        }
     }
 
     private void confirmClearAllAccountCachedData() {
@@ -2735,7 +2845,7 @@ public class MainActivity extends Activity {
 
         LinearLayout.LayoutParams controlParams;
         if (control instanceof Spinner) {
-            controlParams = new LinearLayout.LayoutParams(dp(112), dp(38));
+            controlParams = new LinearLayout.LayoutParams(dp(72), dp(38));
         } else if (control instanceof Switch) {
             controlParams = new LinearLayout.LayoutParams(dp(58), dp(38));
         } else if (control instanceof CheckBox) {
