@@ -49,6 +49,7 @@ import android.widget.AdapterView;
 import android.widget.ArrayAdapter;
 import android.widget.ScrollView;
 import android.widget.Spinner;
+import android.widget.Switch;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -536,7 +537,7 @@ public class MainActivity extends Activity {
         panel.addView(tip, topMargin(dp(14)));
 
         TextView version = new TextView(this);
-        version.setText("作者 kunkun  版本号 1.0.59");
+        version.setText("作者 kunkun  版本号 1.0.60");
         version.setTextSize(13);
         version.setTextColor(0xffb7c9d9);
         version.setGravity(Gravity.CENTER);
@@ -2700,8 +2701,10 @@ public class MainActivity extends Activity {
     }
 
     private LinearLayout settingsSwitchRow(String titleText, String subtitleText, boolean checked, CompoundButton.OnCheckedChangeListener listener) {
-        CheckBox toggle = new CheckBox(this);
-        toggle.setText("");
+        Switch toggle = new Switch(this);
+        if (Build.VERSION.SDK_INT >= 21) {
+            toggle.setShowText(false);
+        }
         toggle.setGravity(Gravity.CENTER);
         toggle.setChecked(checked);
         toggle.setOnCheckedChangeListener(listener);
@@ -2733,6 +2736,8 @@ public class MainActivity extends Activity {
         LinearLayout.LayoutParams controlParams;
         if (control instanceof Spinner) {
             controlParams = new LinearLayout.LayoutParams(dp(112), dp(38));
+        } else if (control instanceof Switch) {
+            controlParams = new LinearLayout.LayoutParams(dp(58), dp(38));
         } else if (control instanceof CheckBox) {
             controlParams = new LinearLayout.LayoutParams(dp(48), dp(38));
         } else {
@@ -2740,6 +2745,9 @@ public class MainActivity extends Activity {
         }
         controlParams.leftMargin = dp(10);
         row.addView(control, controlParams);
+        if (control instanceof CompoundButton) {
+            row.setOnClickListener(v -> ((CompoundButton) control).toggle());
+        }
         return row;
     }
 
