@@ -297,6 +297,9 @@ public class MainActivity extends Activity {
                 .apply();
         toast(picked == null ? "已关闭报警提示音" : "报警提示音已设置");
         playAlarmSound(true);
+        if (currentTab == 3) {
+            showHome();
+        }
     }
 
     @Override
@@ -559,7 +562,7 @@ public class MainActivity extends Activity {
         panel.addView(tip, topMargin(dp(14)));
 
         TextView version = new TextView(this);
-        version.setText("作者 kunkun  版本号 1.0.61");
+        version.setText("作者 kunkun  版本号 1.0.62");
         version.setTextSize(13);
         version.setTextColor(0xffb7c9d9);
         version.setGravity(Gravity.CENTER);
@@ -1595,6 +1598,32 @@ public class MainActivity extends Activity {
         return uri;
     }
 
+    private boolean alarmSoundPicked() {
+        String saved = getSharedPreferences(PREFS, MODE_PRIVATE).getString(PREF_ALARM_SOUND_URI, null);
+        return saved != null && saved.length() > 0;
+    }
+
+    private String selectedAlarmSoundName() {
+        String saved = getSharedPreferences(PREFS, MODE_PRIVATE).getString(PREF_ALARM_SOUND_URI, null);
+        if (saved == null) {
+            return "选择系统提示音";
+        }
+        if (saved.length() == 0) {
+            return "已关闭提示音";
+        }
+        try {
+            Ringtone ringtone = RingtoneManager.getRingtone(getApplicationContext(), Uri.parse(saved));
+            if (ringtone != null) {
+                String title = ringtone.getTitle(getApplicationContext());
+                if (title != null && title.trim().length() > 0) {
+                    return title.trim();
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return "已选择提示音";
+    }
+
     private boolean alarmSoundEnabled() {
         return getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean(PREF_ALARM_SOUND_ENABLED, true);
     }
@@ -2413,9 +2442,9 @@ public class MainActivity extends Activity {
             toast(isChecked ? "退到后台后会继续监控告警" : "已关闭后台轮询，退后台后不再刷新告警");
         }));
         preferenceCard.addView(settingsDivider());
-        TextView pickTone = settingsAction("选择");
+        TextView pickTone = settingsAction(alarmSoundPicked() ? "已选" : "选择");
         pickTone.setOnClickListener(v -> showAlarmSoundPicker());
-        preferenceCard.addView(settingsActionRow("报警提示音", "选择系统提示音", pickTone));
+        preferenceCard.addView(settingsActionRow("报警提示音", selectedAlarmSoundName(), pickTone));
 
         preferenceCard.addView(settingsDivider());
         List<OptionItem> units = new ArrayList<>();
@@ -4660,8 +4689,7 @@ public class MainActivity extends Activity {
                     }
                     LinearLayout row = tableRow();
                     row.setBackground(roundedStroke(i % 2 == 0 ? 0xfffbfdff : 0xfff6f9fd, 10, 0xffedf2f7));
-                    String name = firstNonEmpty(firstValue(device, "mac", "macAddress"), primaryTitle(device));
-                    addTableCell(row, name, 2.25f, false, INK, Gravity.LEFT | Gravity.CENTER_VERTICAL);
+                    addSensorIdentityCell(row, device, 2.25f);
                     TextView pressureView = addTableCell(row, pressureWithUnit(device.optString("pressure")), 1.2f, false, BLUE, Gravity.CENTER);
                     TextView standardView = addTableCell(row, pressureWithUnit(staticPressureText(device)), 1.2f, false, 0xff334155, Gravity.CENTER);
                     String stateText = sensorPressureState(device);
@@ -4685,6 +4713,40 @@ public class MainActivity extends Activity {
         row.setGravity(Gravity.CENTER_VERTICAL);
         row.setPadding(dp(8), dp(7), dp(8), dp(7));
         return row;
+    }
+
+    private void addSensorIdentityCell(LinearLayout row, JSONObject device, float weight) {
+        LinearLayout cell = new LinearLayout(this);
+        cell.setOrientation(LinearLayout.VERTICAL);
+        cell.setGravity(Gravity.CENTER_VERTICAL);
+
+        String mac = firstNonEmpty(firstValue(device, "mac", "macAddress", "number", "deviceNumber"), primaryTitle(device));
+        TextView macView = new TextView(this);
+        macView.setText("MAC：" + clean(mac));
+        macView.setTextSize(11);
+        macView.setTextColor(INK);
+        macView.setTypeface(null, 1);
+        macView.setGravity(Gravity.LEFT);
+        macView.setSingleLine(false);
+        cell.addView(macView);
+
+        String detail = firstNonEmpty(firstValue(device, "name", "deviceName"), "");
+        if (detail.length() == 0) {
+            String title = primaryTitle(device);
+            detail = title.equals(mac) ? "" : title;
+        }
+        if (detail.length() > 0) {
+            TextView detailView = new TextView(this);
+            detailView.setText(clean(detail));
+            detailView.setTextSize(10);
+            detailView.setTextColor(MUTED);
+            detailView.setGravity(Gravity.LEFT);
+            detailView.setSingleLine(false);
+            detailView.setPadding(0, dp(2), 0, 0);
+            cell.addView(detailView);
+        }
+
+        row.addView(cell, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, weight));
     }
 
     private TextView addTableCell(LinearLayout row, String text, float weight, boolean header, int color, int gravity) {
