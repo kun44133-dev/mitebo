@@ -91,8 +91,13 @@ public class MainActivity extends Activity {
     private static final String PREF_PRESSURE_UNIT = "pressure_unit";
     private static final String PREF_OFFLINE_ALARM_MOULD_IDS = "offline_alarm_mould_ids";
     private static final String PREF_LOWER_LIMIT_BACKUP_PREFIX = "lower_limit_backup_";
-    private static final String GITHUB_LATEST_RELEASE_URL =
+    private static final String GITHUB_RELEASE_API_URL =
             "https://api.github.com/repos/kun44133-dev/mitebo/releases/latest";
+    private static final String[] GITHUB_PROXY_PREFIXES = {
+            "https://ghfast.top/",
+            "https://gh.llkk.cc/",
+            "https://gh-proxy.com/"
+    };
     private static final String APP_EXPIRE_AT = "2026-08-31 23:59:59";
     private static final int REQ_ALARM_SOUND = 310;
     private static final int BLUE = 0xff1f6feb;
@@ -170,6 +175,7 @@ public class MainActivity extends Activity {
     private boolean alarmVibrationLooping = false;
     private long updateDownloadId = -1L;
     private AlertDialog updateDownloadDialog;
+    private UpdateInfo activeUpdateInfo;
     private boolean updateDownloadReceiverRegistered = false;
     private final BroadcastReceiver updateDownloadReceiver = new BroadcastReceiver() {
         @Override
@@ -220,6 +226,8 @@ public class MainActivity extends Activity {
             if (appInForeground && token != null && content != null) {
                 if (currentTab == 2) {
                     refreshVisibleMouldPressureValues();
+                } else if (currentTab == 1 && shouldKeepAlarmListStable()) {
+                    fetchAlarmCount(false);
                 } else {
                     loadList(false);
                 }
@@ -575,7 +583,7 @@ public class MainActivity extends Activity {
         panel.addView(tip, topMargin(dp(14)));
 
         TextView version = new TextView(this);
-        version.setText("作者 kunkun  版本号 1.0.63");
+        version.setText("作者 kunkun  版本号 1.0.64");
         version.setTextSize(13);
         version.setTextColor(0xffb7c9d9);
         version.setGravity(Gravity.CENTER);
@@ -964,6 +972,11 @@ public class MainActivity extends Activity {
             return;
         }
         final int requestVersion = ++listRequestVersion;
+        final int requestTab = currentTab;
+        final String requestAlarmDate = currentTab == 1 ? selectedAlarmDate() : "";
+        final boolean requestAlarmHistoryAllMode = alarmHistoryAllMode;
+        final boolean requestAlarmUnclearedOnly = alarmUnclearedOnly;
+        final boolean requestAlarmDateManuallySelected = alarmDateManuallySelected;
         boolean showGlobalLoading = showProgress && currentTab != 2;
         if (showGlobalLoading) {
             loadingListRequestVersion = requestVersion;
@@ -971,7 +984,8 @@ public class MainActivity extends Activity {
         }
         String endpoint = buildListEndpoint();
         new ApiTask("GET", endpoint, null, true, result -> {
-            if (requestVersion != listRequestVersion) {
+            if (requestVersion != listRequestVersion
+                    || !matchesListRequestState(requestTab, requestAlarmDate, requestAlarmHistoryAllMode, requestAlarmUnclearedOnly, requestAlarmDateManuallySelected)) {
                 if (showGlobalLoading && loadingListRequestVersion == requestVersion) {
                     setLoading(false);
                 }
@@ -1980,6 +1994,23 @@ public class MainActivity extends Activity {
         return currentTab == 1 && !alarmHistoryAllMode && !alarmUnclearedOnly;
     }
 
+    private boolean shouldKeepAlarmListStable() {
+        return currentTab == 1 && (alarmDateManuallySelected || alarmHistoryAllMode || alarmUnclearedOnly);
+    }
+
+    private boolean matchesListRequestState(int requestTab, String requestAlarmDate, boolean requestHistoryAllMode, boolean requestUnclearedOnly, boolean requestDateManuallySelected) {
+        if (currentTab != requestTab) {
+            return false;
+        }
+        if (requestTab != 1) {
+            return true;
+        }
+        return alarmHistoryAllMode == requestHistoryAllMode
+                && alarmUnclearedOnly == requestUnclearedOnly
+                && alarmDateManuallySelected == requestDateManuallySelected
+                && selectedAlarmDate().equals(requestAlarmDate);
+    }
+
     private String alarmListTitle() {
         if (alarmHistoryAllMode) {
             return "历史全部告警";
@@ -2576,10 +2607,45 @@ public class MainActivity extends Activity {
     }
 
     private UpdateInfo fetchLatestRelease() {
+        String lastError = "检查更新失败，请检查网络";
+        for (String url : githubReleaseMetadataUrls()) {
+            UpdateInfo update = fetchLatestReleaseFrom(url);
+            if (update.error.length() == 0) {
+                return update;
+            }
+            lastError = update.error;
+        }
+        UpdateInfo update = new UpdateInfo();
+        update.error = lastError;
+        return update;
+    }
+
+    private List<String> githubReleaseMetadataUrls() {
+        List<String> urls = new ArrayList<>();
+        for (String prefix : GITHUB_PROXY_PREFIXES) {
+            urls.add(prefix + GITHUB_RELEASE_API_URL);
+        }
+        urls.add(GITHUB_RELEASE_API_URL);
+        return urls;
+    }
+
+    private List<String> githubDownloadUrls(String originalUrl) {
+        List<String> urls = new ArrayList<>();
+        if (originalUrl == null || originalUrl.length() == 0) {
+            return urls;
+        }
+        for (String prefix : GITHUB_PROXY_PREFIXES) {
+            urls.add(prefix + originalUrl);
+        }
+        urls.add(originalUrl);
+        return urls;
+    }
+
+    private UpdateInfo fetchLatestReleaseFrom(String metadataUrl) {
         UpdateInfo update = new UpdateInfo();
         HttpURLConnection connection = null;
         try {
-            connection = (HttpURLConnection) new URL(GITHUB_LATEST_RELEASE_URL).openConnection();
+            connection = (HttpURLConnection) new URL(metadataUrl).openConnection();
             connection.setConnectTimeout(12000);
             connection.setReadTimeout(12000);
             connection.setRequestProperty("Accept", "application/vnd.github+json");
@@ -2598,12 +2664,12 @@ public class MainActivity extends Activity {
                     JSONObject asset = assets.optJSONObject(i);
                     String name = asset == null ? "" : asset.optString("name");
                     if (name.toLowerCase(java.util.Locale.ROOT).endsWith(".apk")) {
-                        update.downloadUrl = asset.optString("browser_download_url");
+                        update.downloadUrls.addAll(githubDownloadUrls(asset.optString("browser_download_url")));
                         break;
                     }
                 }
             }
-            if (update.version.length() == 0 || update.downloadUrl.length() == 0) {
+            if (update.version.length() == 0 || update.downloadUrls.size() == 0) {
                 update.error = "最新版本未提供 APK 安装包";
             }
         } catch (Exception ignored) {
@@ -2668,13 +2734,24 @@ public class MainActivity extends Activity {
             return;
         }
         DownloadManager manager = (DownloadManager) getSystemService(DOWNLOAD_SERVICE);
-        if (manager == null || update.downloadUrl.length() == 0) {
+        if (manager == null || update.downloadUrls.size() == 0) {
             toast("无法启动更新下载");
             return;
         }
+        activeUpdateInfo = update;
+        activeUpdateInfo.downloadUrlIndex = 0;
+        enqueueUpdateDownload(manager, activeUpdateInfo, false);
+    }
+
+    private void enqueueUpdateDownload(DownloadManager manager, UpdateInfo update, boolean retrying) {
         try {
-            String fileName = "mitebo-" + update.version + ".apk";
-            DownloadManager.Request request = new DownloadManager.Request(Uri.parse(update.downloadUrl));
+            String downloadUrl = update.currentDownloadUrl();
+            if (downloadUrl.length() == 0) {
+                toast("无法启动更新下载");
+                return;
+            }
+            String fileName = "mitebo-" + update.version + "-" + (update.downloadUrlIndex + 1) + ".apk";
+            DownloadManager.Request request = new DownloadManager.Request(Uri.parse(downloadUrl));
             request.setTitle("密特堡压力监测 " + update.version);
             request.setDescription("正在下载更新安装包");
             request.setMimeType("application/vnd.android.package-archive");
@@ -2683,21 +2760,24 @@ public class MainActivity extends Activity {
             request.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
             request.setDestinationInExternalFilesDir(this, Environment.DIRECTORY_DOWNLOADS, fileName);
             updateDownloadId = manager.enqueue(request);
-            showUpdateDownloadDialog(update.version, manager);
+            showUpdateDownloadDialog(update.version, manager, retrying);
             refreshHandler.removeCallbacks(updateDownloadPoller);
             refreshHandler.post(updateDownloadPoller);
         } catch (Exception ignored) {
-            toast("更新下载启动失败");
+            if (!tryNextUpdateDownloadSource(manager)) {
+                toast("更新下载启动失败");
+            }
         }
     }
 
-    private void showUpdateDownloadDialog(String version, DownloadManager manager) {
+    private void showUpdateDownloadDialog(String version, DownloadManager manager, boolean retrying) {
         if (updateDownloadDialog != null) {
             updateDownloadDialog.dismiss();
         }
         updateDownloadDialog = new AlertDialog.Builder(this)
                 .setTitle("正在下载更新")
-                .setMessage("正在下载密特堡压力监测 " + version + "，完成后会自动打开安装确认。")
+                .setMessage((retrying ? "当前下载源较慢，正在切换备用源。\n" : "")
+                        + "正在下载密特堡压力监测 " + version + "，完成后会自动打开安装确认。")
                 .setNegativeButton("取消下载", (d, which) -> {
                     if (updateDownloadId > 0) {
                         try {
@@ -2706,6 +2786,7 @@ public class MainActivity extends Activity {
                         }
                     }
                     updateDownloadId = -1L;
+                    activeUpdateInfo = null;
                     refreshHandler.removeCallbacks(updateDownloadPoller);
                 })
                 .create();
@@ -2737,6 +2818,9 @@ public class MainActivity extends Activity {
                 return;
             }
             if (status == DownloadManager.STATUS_FAILED) {
+                if (tryNextUpdateDownloadSource(manager)) {
+                    return;
+                }
                 finishUpdateDownload(false, "更新下载失败，请重新检查更新");
                 return;
             }
@@ -2749,6 +2833,26 @@ public class MainActivity extends Activity {
                 cursor.close();
             }
         }
+    }
+
+    private boolean tryNextUpdateDownloadSource(DownloadManager manager) {
+        if (activeUpdateInfo == null) {
+            return false;
+        }
+        if (updateDownloadId > 0) {
+            try {
+                manager.remove(updateDownloadId);
+            } catch (Exception ignored) {
+            }
+        }
+        updateDownloadId = -1L;
+        activeUpdateInfo.downloadUrlIndex++;
+        if (activeUpdateInfo.downloadUrlIndex >= activeUpdateInfo.downloadUrls.size()) {
+            activeUpdateInfo = null;
+            return false;
+        }
+        enqueueUpdateDownload(manager, activeUpdateInfo, true);
+        return true;
     }
 
     private void updateDownloadProgressMessage(Cursor cursor) {
@@ -2773,6 +2877,7 @@ public class MainActivity extends Activity {
         }
         if (!success && message.length() > 0) {
             updateDownloadId = -1L;
+            activeUpdateInfo = null;
             toast(message);
         }
     }
@@ -2825,6 +2930,7 @@ public class MainActivity extends Activity {
             intent.putExtra(Intent.EXTRA_RETURN_RESULT, true);
             intent.putExtra(Intent.EXTRA_NOT_UNKNOWN_SOURCE, true);
             updateDownloadId = -1L;
+            activeUpdateInfo = null;
             startActivity(intent);
         } catch (Exception ignored) {
             toast("无法打开安装界面");
@@ -7534,8 +7640,16 @@ public class MainActivity extends Activity {
     private static class UpdateInfo {
         String version = "";
         String notes = "";
-        String downloadUrl = "";
+        List<String> downloadUrls = new ArrayList<>();
+        int downloadUrlIndex = 0;
         String error = "";
+
+        String currentDownloadUrl() {
+            if (downloadUrlIndex < 0 || downloadUrlIndex >= downloadUrls.size()) {
+                return "";
+            }
+            return downloadUrls.get(downloadUrlIndex);
+        }
     }
 
     private interface OptionsCallback {
