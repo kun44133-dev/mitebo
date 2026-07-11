@@ -9,6 +9,7 @@ import android.content.Context;
 import android.content.DialogInterface;
 import android.content.IntentFilter;
 import android.content.SharedPreferences;
+import android.database.Cursor;
 import android.widget.CompoundButton;
 import android.app.Notification;
 import android.app.NotificationChannel;
@@ -168,6 +169,7 @@ public class MainActivity extends Activity {
     private boolean alarmSoundLooping = false;
     private boolean alarmVibrationLooping = false;
     private long updateDownloadId = -1L;
+    private AlertDialog updateDownloadDialog;
     private boolean updateDownloadReceiverRegistered = false;
     private final BroadcastReceiver updateDownloadReceiver = new BroadcastReceiver() {
         @Override
@@ -179,6 +181,12 @@ public class MainActivity extends Activity {
             if (completedId == updateDownloadId) {
                 installDownloadedUpdate(completedId);
             }
+        }
+    };
+    private final Runnable updateDownloadPoller = new Runnable() {
+        @Override
+        public void run() {
+            pollUpdateDownload();
         }
     };
     private final List<String> expandedMouldIds = new ArrayList<>();
@@ -337,8 +345,13 @@ public class MainActivity extends Activity {
     protected void onDestroy() {
         refreshHandler.removeCallbacks(pressureRefresh);
         refreshHandler.removeCallbacks(alarmRefresh);
+        refreshHandler.removeCallbacks(updateDownloadPoller);
         stopAlarmSoundLoop();
         unregisterUpdateDownloadReceiver();
+        if (updateDownloadDialog != null) {
+            updateDownloadDialog.dismiss();
+            updateDownloadDialog = null;
+        }
         super.onDestroy();
     }
 
@@ -562,7 +575,7 @@ public class MainActivity extends Activity {
         panel.addView(tip, topMargin(dp(14)));
 
         TextView version = new TextView(this);
-        version.setText("作者 kunkun  版本号 1.0.62");
+        version.setText("作者 kunkun  版本号 1.0.63");
         version.setTextSize(13);
         version.setTextColor(0xffb7c9d9);
         version.setGravity(Gravity.CENTER);
@@ -2670,9 +2683,97 @@ public class MainActivity extends Activity {
             request.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
             request.setDestinationInExternalFilesDir(this, Environment.DIRECTORY_DOWNLOADS, fileName);
             updateDownloadId = manager.enqueue(request);
-            toast("已开始下载，完成后将打开安装界面");
+            showUpdateDownloadDialog(update.version, manager);
+            refreshHandler.removeCallbacks(updateDownloadPoller);
+            refreshHandler.post(updateDownloadPoller);
         } catch (Exception ignored) {
             toast("更新下载启动失败");
+        }
+    }
+
+    private void showUpdateDownloadDialog(String version, DownloadManager manager) {
+        if (updateDownloadDialog != null) {
+            updateDownloadDialog.dismiss();
+        }
+        updateDownloadDialog = new AlertDialog.Builder(this)
+                .setTitle("正在下载更新")
+                .setMessage("正在下载密特堡压力监测 " + version + "，完成后会自动打开安装确认。")
+                .setNegativeButton("取消下载", (d, which) -> {
+                    if (updateDownloadId > 0) {
+                        try {
+                            manager.remove(updateDownloadId);
+                        } catch (Exception ignored) {
+                        }
+                    }
+                    updateDownloadId = -1L;
+                    refreshHandler.removeCallbacks(updateDownloadPoller);
+                })
+                .create();
+        updateDownloadDialog.setOnShowListener(d -> styleDialogButtons(updateDownloadDialog));
+        showStyledDialog(updateDownloadDialog);
+    }
+
+    private void pollUpdateDownload() {
+        if (updateDownloadId <= 0) {
+            return;
+        }
+        DownloadManager manager = (DownloadManager) getSystemService(DOWNLOAD_SERVICE);
+        if (manager == null) {
+            finishUpdateDownload(false, "无法读取更新下载状态");
+            return;
+        }
+        Cursor cursor = null;
+        try {
+            cursor = manager.query(new DownloadManager.Query().setFilterById(updateDownloadId));
+            if (cursor == null || !cursor.moveToFirst()) {
+                finishUpdateDownload(false, "更新下载已取消");
+                return;
+            }
+            int status = cursor.getInt(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS));
+            if (status == DownloadManager.STATUS_SUCCESSFUL) {
+                long completedId = updateDownloadId;
+                finishUpdateDownload(true, "");
+                installDownloadedUpdate(completedId);
+                return;
+            }
+            if (status == DownloadManager.STATUS_FAILED) {
+                finishUpdateDownload(false, "更新下载失败，请重新检查更新");
+                return;
+            }
+            updateDownloadProgressMessage(cursor);
+            refreshHandler.postDelayed(updateDownloadPoller, 800);
+        } catch (Exception ignored) {
+            finishUpdateDownload(false, "更新下载状态异常，请重新检查更新");
+        } finally {
+            if (cursor != null) {
+                cursor.close();
+            }
+        }
+    }
+
+    private void updateDownloadProgressMessage(Cursor cursor) {
+        if (updateDownloadDialog == null) {
+            return;
+        }
+        long total = cursor.getLong(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_TOTAL_SIZE_BYTES));
+        long done = cursor.getLong(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_BYTES_DOWNLOADED_SO_FAR));
+        if (total > 0 && done >= 0) {
+            int percent = (int) Math.min(100, Math.max(0, done * 100 / total));
+            updateDownloadDialog.setMessage("正在下载更新包：" + percent + "%\n下载完成后会自动打开安装确认。");
+        } else {
+            updateDownloadDialog.setMessage("正在下载更新包...\n下载完成后会自动打开安装确认。");
+        }
+    }
+
+    private void finishUpdateDownload(boolean success, String message) {
+        refreshHandler.removeCallbacks(updateDownloadPoller);
+        if (updateDownloadDialog != null) {
+            updateDownloadDialog.dismiss();
+            updateDownloadDialog = null;
+        }
+        if (!success && message.length() > 0) {
+            updateDownloadId = -1L;
+            toast(message);
         }
     }
 
@@ -2696,13 +2797,20 @@ public class MainActivity extends Activity {
     }
 
     private void installDownloadedUpdate(long downloadId) {
+        refreshHandler.removeCallbacks(updateDownloadPoller);
+        if (updateDownloadDialog != null) {
+            updateDownloadDialog.dismiss();
+            updateDownloadDialog = null;
+        }
         DownloadManager manager = (DownloadManager) getSystemService(DOWNLOAD_SERVICE);
         if (manager == null) {
+            updateDownloadId = -1L;
             toast("无法读取更新安装包");
             return;
         }
         Uri apkUri = manager.getUriForDownloadedFile(downloadId);
         if (apkUri == null) {
+            updateDownloadId = -1L;
             toast("更新下载失败，请重新检查更新");
             return;
         }
@@ -2711,9 +2819,12 @@ public class MainActivity extends Activity {
             return;
         }
         try {
-            Intent intent = new Intent(Intent.ACTION_VIEW);
+            Intent intent = new Intent(Intent.ACTION_INSTALL_PACKAGE);
             intent.setDataAndType(apkUri, "application/vnd.android.package-archive");
             intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            intent.putExtra(Intent.EXTRA_RETURN_RESULT, true);
+            intent.putExtra(Intent.EXTRA_NOT_UNKNOWN_SOURCE, true);
+            updateDownloadId = -1L;
             startActivity(intent);
         } catch (Exception ignored) {
             toast("无法打开安装界面");
