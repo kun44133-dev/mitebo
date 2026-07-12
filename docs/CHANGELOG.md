@@ -2,6 +2,20 @@
 
 本文件用于持续记录 App 的每次功能、界面和稳定性修改。最新记录放在最上方。
 
+## 2026-07-12
+
+### 打包版本 1.0.65
+
+- `versionCode` 更新为 `65`，`versionName` 和登录页版本号更新为 `1.0.65`。
+- 本次安装包包含模具传感器低电量图标显示。
+
+### 模具传感器低电量图标
+
+- 新增立式灰色电池加红色感叹号低电量图标资源。
+- 模具卡片展开后的传感器状态列中，传感器电量低于 30% 时显示低电量图标。
+- 低电量判断统一使用 `battery`、`electricity`、`power`、`bat` 字段。
+- 影响文件：`app/src/main/java/cn/mitebo/iot/MainActivity.java`、`app/src/main/res/drawable/ic_low_battery.xml`。
+
 ## 2026-07-11
 
 ### 打包版本 1.0.64

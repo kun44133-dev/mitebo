@@ -583,7 +583,7 @@ public class MainActivity extends Activity {
         panel.addView(tip, topMargin(dp(14)));
 
         TextView version = new TextView(this);
-        version.setText("作者 kunkun  版本号 1.0.64");
+        version.setText("作者 kunkun  版本号 1.0.65");
         version.setTextSize(13);
         version.setTextColor(0xffb7c9d9);
         version.setGravity(Gravity.CENTER);
@@ -4856,8 +4856,8 @@ public class MainActivity extends Activity {
         if (text.contains("电量") || text.contains("低电") || text.contains("battery") || text.contains("low power")) {
             return true;
         }
-        Double battery = numberValue(firstValue(item, "battery", "electricity", "power"));
-        return battery != null && battery > 0 && battery <= 20;
+        Double battery = numberValue(firstValue(item, "battery", "electricity", "power", "bat"));
+        return battery != null && battery >= 0 && battery < 30;
     }
 
     private String firstNonEmpty(String first, String fallback) {
@@ -4909,8 +4909,7 @@ public class MainActivity extends Activity {
                     addSensorIdentityCell(row, device, 2.25f);
                     TextView pressureView = addTableCell(row, pressureWithUnit(device.optString("pressure")), 1.2f, false, BLUE, Gravity.CENTER);
                     TextView standardView = addTableCell(row, pressureWithUnit(staticPressureText(device)), 1.2f, false, 0xff334155, Gravity.CENTER);
-                    String stateText = sensorPressureState(device);
-                    addTableCell(row, stateText, 0.85f, false, sensorStateColor(stateText), Gravity.CENTER);
+                    addSensorStatusCell(row, device, 0.85f);
                     table.addView(row, topMargin(dp(6)));
                     String key = deviceKey(device);
                     if (key.length() > 0) {
@@ -4966,6 +4965,22 @@ public class MainActivity extends Activity {
         row.addView(cell, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, weight));
     }
 
+    private void addSensorStatusCell(LinearLayout row, JSONObject device, float weight) {
+        if (!isSensorBatteryLow(device)) {
+            String stateText = sensorPressureState(device);
+            addTableCell(row, stateText, weight, false, sensorStateColor(stateText), Gravity.CENTER);
+            return;
+        }
+        LinearLayout cell = new LinearLayout(this);
+        cell.setGravity(Gravity.CENTER);
+        ImageView icon = new ImageView(this);
+        icon.setImageResource(R.drawable.ic_low_battery);
+        icon.setAdjustViewBounds(true);
+        icon.setContentDescription("电量低");
+        cell.addView(icon, new LinearLayout.LayoutParams(dp(18), dp(24)));
+        row.addView(cell, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, weight));
+    }
+
     private TextView addTableCell(LinearLayout row, String text, float weight, boolean header, int color, int gravity) {
         TextView cell = new TextView(this);
         cell.setText(clean(text));
@@ -4976,6 +4991,15 @@ public class MainActivity extends Activity {
         cell.setSingleLine(false);
         row.addView(cell, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, weight));
         return cell;
+    }
+
+    private boolean isSensorBatteryLow(JSONObject device) {
+        String raw = firstValue(device, "battery", "electricity", "power", "bat");
+        if (raw.length() == 0) {
+            return false;
+        }
+        Double battery = numberValue(raw);
+        return battery != null && battery >= 0 && battery < 30;
     }
 
     private String sensorPressureState(JSONObject device) {
