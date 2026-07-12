@@ -583,7 +583,7 @@ public class MainActivity extends Activity {
         panel.addView(tip, topMargin(dp(14)));
 
         TextView version = new TextView(this);
-        version.setText("作者 kunkun  版本号 1.0.65");
+        version.setText("作者 kunkun  版本号 1.0.66");
         version.setTextSize(13);
         version.setTextColor(0xffb7c9d9);
         version.setGravity(Gravity.CENTER);
@@ -4856,8 +4856,8 @@ public class MainActivity extends Activity {
         if (text.contains("电量") || text.contains("低电") || text.contains("battery") || text.contains("low power")) {
             return true;
         }
-        Double battery = numberValue(firstValue(item, "battery", "electricity", "power", "bat"));
-        return battery != null && battery >= 0 && battery < 30;
+        Double battery = numberValue(firstValue(item, "battery", "electricity", "voltage", "bat"));
+        return battery != null && battery < 30;
     }
 
     private String firstNonEmpty(String first, String fallback) {
@@ -4994,12 +4994,12 @@ public class MainActivity extends Activity {
     }
 
     private boolean isSensorBatteryLow(JSONObject device) {
-        String raw = firstValue(device, "battery", "electricity", "power", "bat");
+        String raw = firstValue(device, "battery", "electricity", "voltage", "bat");
         if (raw.length() == 0) {
             return false;
         }
         Double battery = numberValue(raw);
-        return battery != null && battery >= 0 && battery < 30;
+        return battery != null && battery < 30;
     }
 
     private String sensorPressureState(JSONObject device) {
@@ -5507,7 +5507,7 @@ public class MainActivity extends Activity {
     }
 
     private String batteryText(JSONObject device) {
-        String battery = firstValue(device, "battery", "electricity", "power", "voltage", "bat");
+        String battery = firstValue(device, "battery", "electricity", "voltage", "bat");
         if (battery.length() == 0) {
             return "-";
         }
@@ -7736,11 +7736,6 @@ public class MainActivity extends Activity {
                         // Keep the unfiltered list when binding data cannot be loaded.
                     }
                 }
-                try {
-                    JSONObject deviceJson = requestJson("GET", "/yujing/device/list?pageNum=1&pageSize=500", null, true);
-                    appendDeviceInfoToMouldOptions(deviceJson.optJSONArray("rows"), state.moulds);
-                } catch (Exception ignored) {
-                }
                 JSONObject mould = source == null ? null : source.optJSONObject("mould");
                 String mouldId = valueOf(source, "mouldId");
                 if (mouldId.length() == 0 && mould != null) {
@@ -7957,53 +7952,6 @@ public class MainActivity extends Activity {
         }
         String text = value.trim();
         return "null".equalsIgnoreCase(text) || "-".equals(text) ? "" : text;
-    }
-
-    private void appendDeviceInfoToMouldOptions(JSONArray devices, List<OptionItem> moulds) {
-        if (devices == null || moulds.size() <= 1) {
-            return;
-        }
-        Map<String, StringBuilder> deviceInfoByMould = new HashMap<>();
-        for (int i = 0; i < devices.length(); i++) {
-            JSONObject device = devices.optJSONObject(i);
-            if (device == null) {
-                continue;
-            }
-            String mouldId = device.optString("mouldId");
-            if (mouldId.length() == 0) {
-                JSONObject mould = device.optJSONObject("mould");
-                mouldId = mould == null ? "" : mould.optString("id");
-            }
-            if (mouldId.length() == 0) {
-                continue;
-            }
-            StringBuilder line = deviceInfoByMould.get(mouldId);
-            if (line == null) {
-                line = new StringBuilder();
-                deviceInfoByMould.put(mouldId, line);
-            } else {
-                line.append("；");
-            }
-            line.append(device.optString("number"));
-            String name = device.optString("name");
-            if (name.length() > 0) {
-                line.append(" ").append(name);
-            }
-            String pressure = device.optString("pressure");
-            if (pressure.length() > 0 && !"null".equals(pressure)) {
-                line.append(" 实时").append(pressureWithUnit(pressure));
-            }
-            String standard = device.optString("standard");
-            if (standard.length() > 0 && !"null".equals(standard)) {
-                line.append(" 标准").append(pressureWithUnit(standard));
-            }
-        }
-        for (OptionItem mould : moulds) {
-            StringBuilder deviceInfo = deviceInfoByMould.get(mould.value);
-            if (deviceInfo != null && deviceInfo.length() > 0) {
-                mould.label = mould.label + " | 设备 " + deviceInfo;
-            }
-        }
     }
 
     private boolean containsOption(List<OptionItem> items, String value) {
