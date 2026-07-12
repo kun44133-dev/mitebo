@@ -583,7 +583,7 @@ public class MainActivity extends Activity {
         panel.addView(tip, topMargin(dp(14)));
 
         TextView version = new TextView(this);
-        version.setText("作者 kunkun  版本号 1.0.66");
+        version.setText("作者 kunkun  版本号 1.0.67");
         version.setTextSize(13);
         version.setTextColor(0xffb7c9d9);
         version.setGravity(Gravity.CENTER);
@@ -4835,9 +4835,6 @@ public class MainActivity extends Activity {
         JSONArray details = alarmDetails(item);
         JSONObject sensor = details == null || details.length() == 0 ? null : details.optJSONObject(0);
         if (sensor != null) {
-            if (isLowBatteryAlarm(sensor)) {
-                return "电量低报警";
-            }
             Double pressure = numberValue(sensor.optString("pressure"));
             Double upper = numberValue(sensor.optString("upper"));
             Double lower = numberValue(sensor.optString("lower"));
@@ -4846,6 +4843,9 @@ public class MainActivity extends Activity {
             }
             if (lower != null && pressure != null && pressure < lower) {
                 return "压力下限报警";
+            }
+            if (isLowBatteryAlarm(sensor)) {
+                return "电量低报警";
             }
         }
         return "压力报警";
