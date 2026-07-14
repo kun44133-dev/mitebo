@@ -583,7 +583,7 @@ public class MainActivity extends Activity {
         panel.addView(tip, topMargin(dp(14)));
 
         TextView version = new TextView(this);
-        version.setText("作者 kunkun  版本号 1.0.68");
+        version.setText("作者 kunkun  版本号 1.0.69");
         version.setTextSize(13);
         version.setTextColor(0xffb7c9d9);
         version.setGravity(Gravity.CENTER);
@@ -4429,16 +4429,41 @@ public class MainActivity extends Activity {
         JSONArray details = alarmDetails(item);
         JSONObject sensor = details == null || details.length() == 0 ? null : details.optJSONObject(0);
         if (sensor != null) {
-            return "传感器：" + alarmSensorSummaryName(sensor) + "  压力：" + pressureWithUnit(sensor.optString("pressure"));
+            return alarmMouldSensorTitle(item, sensor)
+                    + "  触发压力：" + pressureWithUnit(sensor.optString("pressure"));
         }
         return "时间：" + clean(firstValue(item, "createTime", "create_time", "alarmTime"));
     }
 
+    private String alarmMouldSensorTitle(JSONObject alarm, JSONObject sensor) {
+        String mouldName = alarmMouldSummaryName(alarm, sensor);
+        String sensorName = alarmSensorSummaryName(sensor);
+        if (mouldName.length() == 0 || "-".equals(mouldName)) {
+            return sensorName;
+        }
+        return mouldName + "  " + sensorName;
+    }
+
+    private String alarmMouldSummaryName(JSONObject alarm, JSONObject sensor) {
+        JSONObject mould = alarm == null ? null : alarm.optJSONObject("mould");
+        if (mould == null && sensor != null) {
+            mould = sensor.optJSONObject("mould");
+        }
+        if (mould != null) {
+            String number = firstValue(mould, "number", "mouldNumber");
+            String name = firstValue(mould, "name", "mouldName");
+            String title = (number + " " + name).trim();
+            if (title.length() > 0) {
+                return clean(title);
+            }
+        }
+        String fallback = alarm == null ? "" : firstValue(alarm, "mouldName", "mould_name", "mouldNumber", "mould_number");
+        return fallback.length() == 0 ? "-" : clean(fallback);
+    }
+
     private String alarmSensorSummaryName(JSONObject sensor) {
         String name = firstValue(sensor, "name", "deviceName");
-        String number = firstValue(sensor, "number", "deviceNumber", "mac", "macAddress");
-        String result = (name + " " + number).trim();
-        return result.length() == 0 ? "未知传感器" : result;
+        return name.length() == 0 ? "未知传感器" : clean(name);
     }
 
     private View gatewayDisplayCard(JSONObject item) {
@@ -5678,7 +5703,7 @@ public class MainActivity extends Activity {
             row.setBackground(roundedStroke(0xfffbfdff, 12, 0xffe3ebf5));
 
             TextView title = new TextView(this);
-            title.setText(sensorName(sensor));
+            title.setText(alarmMouldSensorTitle(alarm, sensor));
             title.setTextSize(12);
             title.setTextColor(INK);
             title.setTypeface(null, 1);
