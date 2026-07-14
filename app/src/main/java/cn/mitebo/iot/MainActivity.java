@@ -584,7 +584,7 @@ public class MainActivity extends Activity {
         panel.addView(tip, topMargin(dp(14)));
 
         TextView version = new TextView(this);
-        version.setText("作者 kunkun  版本号 1.0.70");
+        version.setText("作者 kunkun  版本号 1.0.71");
         version.setTextSize(13);
         version.setTextColor(0xffb7c9d9);
         version.setGravity(Gravity.CENTER);
@@ -2266,10 +2266,10 @@ public class MainActivity extends Activity {
             deviceActions.setOrientation(LinearLayout.HORIZONTAL);
             deviceActions.setGravity(Gravity.CENTER_VERTICAL);
 
-            Button lowBattery = smallButton("低电设备");
+            Button lowBattery = smallButton(lowBatteryDeviceMode ? "清除显示" : "低电设备");
             styleButton(lowBattery, lowBatteryDeviceMode ? 0xfff97316 : BLUE, 0xffffffff, lowBatteryDeviceMode ? 0xfff97316 : BLUE);
             lowBattery.setOnClickListener(v -> {
-                lowBatteryDeviceMode = true;
+                lowBatteryDeviceMode = !lowBatteryDeviceMode;
                 if (macSearchInput != null) {
                     macSearchInput.setText("");
                 }
