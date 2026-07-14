@@ -163,6 +163,7 @@ public class MainActivity extends Activity {
     private boolean alarmUnclearedOnly = false;
     private boolean alarmHistoryAllMode = false;
     private long lastAlarmAllClickAt = 0;
+    private boolean lowBatteryDeviceMode = false;
     private boolean offlineMouldMode = false;
     private boolean gatewayManagementMode = false;
     private boolean appInForeground = false;
@@ -583,7 +584,7 @@ public class MainActivity extends Activity {
         panel.addView(tip, topMargin(dp(14)));
 
         TextView version = new TextView(this);
-        version.setText("作者 kunkun  版本号 1.0.69");
+        version.setText("作者 kunkun  版本号 1.0.70");
         version.setTextSize(13);
         version.setTextColor(0xffb7c9d9);
         version.setGravity(Gravity.CENTER);
@@ -968,7 +969,7 @@ public class MainActivity extends Activity {
             }
             clearVisibleMouldValueViews();
             content.removeAllViews();
-            showEmpty("设备页默认不显示全部设备，请使用 MAC 查询或添加监控");
+            showEmpty("设备页默认不显示全部设备，请使用 MAC 查询、低电设备或添加监控");
             return;
         }
         final int requestVersion = ++listRequestVersion;
@@ -1044,7 +1045,7 @@ public class MainActivity extends Activity {
                     return;
                 }
                 if (currentTab != 1) {
-                    addSectionTitle(tabTitles[currentTab] + "列表");
+                    addSectionTitle(currentTab == 0 && lowBatteryDeviceMode ? "低电设备列表" : tabTitles[currentTab] + "列表");
                 }
                 int added = renderListRows(rows);
                 if (isAlarmDateMode() && (added == 0 || renderedAlarmRowsAllActive(rows))) {
@@ -1056,7 +1057,7 @@ public class MainActivity extends Activity {
                         scanAlarmDateRows(selectedAlarmDate(), requestVersion, rows);
                         return;
                     }
-                    showEmpty(currentTab == 0 ? "未找到匹配的设备" : currentTab == 1 ? alarmListTitle() + " 暂无告警" : "暂无数据");
+                    showEmpty(currentTab == 0 ? (lowBatteryDeviceMode ? "暂无低电设备" : "未找到匹配的设备") : currentTab == 1 ? alarmListTitle() + " 暂无告警" : "暂无数据");
                 }
             } catch (Exception e) {
                 showEmpty("数据解析失败");
@@ -1904,8 +1905,14 @@ public class MainActivity extends Activity {
     }
 
     private boolean matchesDeviceQuery(JSONObject item) {
-        if (currentTab != 0 || macSearchInput == null) {
-            return currentTab != 0 || matchesMonitoredDevice(item);
+        if (currentTab != 0) {
+            return true;
+        }
+        if (lowBatteryDeviceMode) {
+            return isSensorBatteryLow(item);
+        }
+        if (macSearchInput == null) {
+            return matchesMonitoredDevice(item);
         }
         String query = macSearchInput.getText().toString().trim().toLowerCase();
         if (query.length() == 0) {
@@ -1937,6 +1944,9 @@ public class MainActivity extends Activity {
 
     private boolean hasDeviceDisplayFilter() {
         if (currentTab != 0) {
+            return true;
+        }
+        if (lowBatteryDeviceMode) {
             return true;
         }
         if (monitoredMacs().size() > 0) {
@@ -2019,7 +2029,9 @@ public class MainActivity extends Activity {
     }
 
     private String buildListEndpoint() {
-        String pageSize = currentTab == 1 ? String.valueOf(ALARM_PAGE_SIZE) : (currentTab == 0 || currentTab == 2 ? "200" : "20");
+        String pageSize = currentTab == 1
+                ? String.valueOf(ALARM_PAGE_SIZE)
+                : (currentTab == 0 ? (lowBatteryDeviceMode ? "1000" : "200") : currentTab == 2 ? "200" : "20");
         String baseEndpoint = currentTab == 2 && gatewayManagementMode ? "/yujing/gateway/list" : tabEndpoints[currentTab];
         String endpoint = baseEndpoint + "?pageNum=1&pageSize=" + pageSize;
         String mac = macSearchInput == null ? "" : macSearchInput.getText().toString().trim();
@@ -2089,10 +2101,12 @@ public class MainActivity extends Activity {
                 .setView(form)
                 .setNegativeButton("重置", (d, which) -> {
                     macSearchInput = null;
+                    lowBatteryDeviceMode = false;
                     loadList();
                 })
                 .setPositiveButton("查询", (d, which) -> {
                     macSearchInput = input;
+                    lowBatteryDeviceMode = false;
                     loadList();
                 })
                 .create();
@@ -2113,6 +2127,7 @@ public class MainActivity extends Activity {
                 .setView(form)
                 .setNegativeButton("清空监控", (d, which) -> {
                     saveMonitoredMacs(new ArrayList<>());
+                    lowBatteryDeviceMode = false;
                     loadList();
                 })
                 .setPositiveButton("添加", (d, which) -> {
@@ -2134,6 +2149,7 @@ public class MainActivity extends Activity {
                         saveMonitoredMacs(next);
                     }
                     macSearchInput = null;
+                    lowBatteryDeviceMode = false;
                     loadList();
                 })
                 .create();
@@ -2213,6 +2229,7 @@ public class MainActivity extends Activity {
             clearSearch.setVisibility(View.GONE);
             clearSearch.setOnClickListener(v -> {
                 macSearchInput.setText("");
+                lowBatteryDeviceMode = false;
                 loadList();
             });
             macSearchInput.addTextChangedListener(new TextWatcher() {
@@ -2236,16 +2253,37 @@ public class MainActivity extends Activity {
 
             Button button = smallButton("MAC查询");
             styleButton(button, BLUE, 0xffffffff, BLUE);
-            button.setOnClickListener(v -> loadList());
+            button.setOnClickListener(v -> {
+                lowBatteryDeviceMode = false;
+                loadList();
+            });
             LinearLayout.LayoutParams buttonParams = new LinearLayout.LayoutParams(dp(92), dp(40));
             buttonParams.leftMargin = dp(6);
             search.addView(button, buttonParams);
             panel.addView(search);
 
+            LinearLayout deviceActions = new LinearLayout(this);
+            deviceActions.setOrientation(LinearLayout.HORIZONTAL);
+            deviceActions.setGravity(Gravity.CENTER_VERTICAL);
+
+            Button lowBattery = smallButton("低电设备");
+            styleButton(lowBattery, lowBatteryDeviceMode ? 0xfff97316 : BLUE, 0xffffffff, lowBatteryDeviceMode ? 0xfff97316 : BLUE);
+            lowBattery.setOnClickListener(v -> {
+                lowBatteryDeviceMode = true;
+                if (macSearchInput != null) {
+                    macSearchInput.setText("");
+                }
+                loadList();
+            });
+            deviceActions.addView(lowBattery, new LinearLayout.LayoutParams(0, dp(44), 1));
+
             Button addMonitor = smallButton("+ 添加监控");
             styleButton(addMonitor, BLUE, 0xffffffff, BLUE);
             addMonitor.setOnClickListener(v -> showAddMonitorDeviceDialog());
-            panel.addView(addMonitor, fixedTop(ViewGroup.LayoutParams.MATCH_PARENT, dp(44), dp(10)));
+            LinearLayout.LayoutParams addMonitorParams = new LinearLayout.LayoutParams(0, dp(44), 1);
+            addMonitorParams.leftMargin = dp(10);
+            deviceActions.addView(addMonitor, addMonitorParams);
+            panel.addView(deviceActions, fixedTop(ViewGroup.LayoutParams.MATCH_PARENT, dp(44), dp(10)));
         } else if (currentTab == 1) {
             LinearLayout chips = new LinearLayout(this);
             chips.setOrientation(LinearLayout.HORIZONTAL);
@@ -4436,7 +4474,7 @@ public class MainActivity extends Activity {
     }
 
     private String alarmMouldSensorTitle(JSONObject alarm, JSONObject sensor) {
-        String mouldName = alarmMouldSummaryName(alarm, sensor);
+        String mouldName = alarmMouldSummaryNumber(alarm, sensor);
         String sensorName = alarmSensorSummaryName(sensor);
         if (mouldName.length() == 0 || "-".equals(mouldName)) {
             return sensorName;
@@ -4444,20 +4482,22 @@ public class MainActivity extends Activity {
         return mouldName + "  " + sensorName;
     }
 
-    private String alarmMouldSummaryName(JSONObject alarm, JSONObject sensor) {
+    private String alarmMouldSummaryNumber(JSONObject alarm, JSONObject sensor) {
         JSONObject mould = alarm == null ? null : alarm.optJSONObject("mould");
         if (mould == null && sensor != null) {
             mould = sensor.optJSONObject("mould");
         }
         if (mould != null) {
             String number = firstValue(mould, "number", "mouldNumber");
+            if (number.length() > 0) {
+                return clean(number);
+            }
             String name = firstValue(mould, "name", "mouldName");
-            String title = (number + " " + name).trim();
-            if (title.length() > 0) {
-                return clean(title);
+            if (name.length() > 0) {
+                return clean(name);
             }
         }
-        String fallback = alarm == null ? "" : firstValue(alarm, "mouldName", "mould_name", "mouldNumber", "mould_number");
+        String fallback = alarm == null ? "" : firstValue(alarm, "mouldNumber", "mould_number", "mouldName", "mould_name");
         return fallback.length() == 0 ? "-" : clean(fallback);
     }
 
