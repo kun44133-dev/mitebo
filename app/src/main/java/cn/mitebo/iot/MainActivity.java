@@ -583,7 +583,7 @@ public class MainActivity extends Activity {
         panel.addView(tip, topMargin(dp(14)));
 
         TextView version = new TextView(this);
-        version.setText("作者 kunkun  版本号 1.0.67");
+        version.setText("作者 kunkun  版本号 1.0.68");
         version.setTextSize(13);
         version.setTextColor(0xffb7c9d9);
         version.setGravity(Gravity.CENTER);
@@ -4429,9 +4429,16 @@ public class MainActivity extends Activity {
         JSONArray details = alarmDetails(item);
         JSONObject sensor = details == null || details.length() == 0 ? null : details.optJSONObject(0);
         if (sensor != null) {
-            return "传感器：" + sensorName(sensor) + "  压力：" + pressureWithUnit(sensor.optString("pressure"));
+            return "传感器：" + alarmSensorSummaryName(sensor) + "  压力：" + pressureWithUnit(sensor.optString("pressure"));
         }
         return "时间：" + clean(firstValue(item, "createTime", "create_time", "alarmTime"));
+    }
+
+    private String alarmSensorSummaryName(JSONObject sensor) {
+        String name = firstValue(sensor, "name", "deviceName");
+        String number = firstValue(sensor, "number", "deviceNumber", "mac", "macAddress");
+        String result = (name + " " + number).trim();
+        return result.length() == 0 ? "未知传感器" : result;
     }
 
     private View gatewayDisplayCard(JSONObject item) {
@@ -4664,7 +4671,8 @@ public class MainActivity extends Activity {
         numberLabel.setTextSize(13);
         numberLabel.setTextColor(0xff64748b);
         numberLabel.setGravity(Gravity.LEFT | Gravity.CENTER_VERTICAL);
-        numberRow.addView(numberLabel, new LinearLayout.LayoutParams(dp(38), ViewGroup.LayoutParams.MATCH_PARENT));
+        numberLabel.setSingleLine(true);
+        numberRow.addView(numberLabel, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
         TextView numberValue = new TextView(this);
         numberValue.setText(number);
@@ -4691,7 +4699,8 @@ public class MainActivity extends Activity {
         nameLabel.setTextSize(13);
         nameLabel.setTextColor(0xff64748b);
         nameLabel.setGravity(Gravity.LEFT | Gravity.CENTER_VERTICAL);
-        nameRow.addView(nameLabel, new LinearLayout.LayoutParams(dp(38), ViewGroup.LayoutParams.MATCH_PARENT));
+        nameLabel.setSingleLine(true);
+        nameRow.addView(nameLabel, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
         TextView nameValue = new TextView(this);
         nameValue.setText(name);
