@@ -584,7 +584,7 @@ public class MainActivity extends Activity {
         panel.addView(tip, topMargin(dp(14)));
 
         TextView version = new TextView(this);
-        version.setText("作者 kunkun  版本号 1.0.71");
+        version.setText("作者 kunkun  版本号 1.0.72");
         version.setTextSize(13);
         version.setTextColor(0xffb7c9d9);
         version.setGravity(Gravity.CENTER);
@@ -1909,7 +1909,7 @@ public class MainActivity extends Activity {
             return true;
         }
         if (lowBatteryDeviceMode) {
-            return isSensorBatteryLow(item);
+            return isLowBatteryListDevice(item);
         }
         if (macSearchInput == null) {
             return matchesMonitoredDevice(item);
@@ -1940,6 +1940,10 @@ public class MainActivity extends Activity {
             }
         }
         return false;
+    }
+
+    private boolean isLowBatteryListDevice(JSONObject item) {
+        return isSensorBatteryLow(item) && !matchesMonitoredDevice(item);
     }
 
     private boolean hasDeviceDisplayFilter() {
@@ -2273,7 +2277,7 @@ public class MainActivity extends Activity {
                 if (macSearchInput != null) {
                     macSearchInput.setText("");
                 }
-                loadList();
+                showHome();
             });
             deviceActions.addView(lowBattery, new LinearLayout.LayoutParams(0, dp(44), 1));
 
@@ -4163,6 +4167,9 @@ public class MainActivity extends Activity {
         arrow.setGravity(Gravity.CENTER);
         card.addView(arrow, new LinearLayout.LayoutParams(dp(16), dp(48)));
         card.setOnClickListener(v -> showDetail(item));
+        if (lowBatteryDeviceMode) {
+            return card;
+        }
         return swipeDeleteDeviceRow(item, card);
     }
 
