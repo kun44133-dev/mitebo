@@ -169,6 +169,7 @@ public class MainActivity extends Activity {
     private boolean appInForeground = false;
     private float mouldPullStartY = -1f;
     private boolean mouldPullReady = false;
+    private Button lowBatteryDeviceButton;
     private View openedDeviceSwipeCard;
     private long lastAlarmSoundAt = 0;
     private Ringtone activeAlarmRingtone;
@@ -584,7 +585,7 @@ public class MainActivity extends Activity {
         panel.addView(tip, topMargin(dp(14)));
 
         TextView version = new TextView(this);
-        version.setText("作者 kunkun  版本号 1.0.72");
+        version.setText("作者 kunkun  版本号 1.0.73");
         version.setTextSize(13);
         version.setTextColor(0xffb7c9d9);
         version.setGravity(Gravity.CENTER);
@@ -2234,6 +2235,7 @@ public class MainActivity extends Activity {
             clearSearch.setOnClickListener(v -> {
                 macSearchInput.setText("");
                 lowBatteryDeviceMode = false;
+                updateLowBatteryDeviceButton();
                 loadList();
             });
             macSearchInput.addTextChangedListener(new TextWatcher() {
@@ -2259,6 +2261,7 @@ public class MainActivity extends Activity {
             styleButton(button, BLUE, 0xffffffff, BLUE);
             button.setOnClickListener(v -> {
                 lowBatteryDeviceMode = false;
+                updateLowBatteryDeviceButton();
                 loadList();
             });
             LinearLayout.LayoutParams buttonParams = new LinearLayout.LayoutParams(dp(92), dp(40));
@@ -2270,16 +2273,17 @@ public class MainActivity extends Activity {
             deviceActions.setOrientation(LinearLayout.HORIZONTAL);
             deviceActions.setGravity(Gravity.CENTER_VERTICAL);
 
-            Button lowBattery = smallButton(lowBatteryDeviceMode ? "清除显示" : "低电设备");
-            styleButton(lowBattery, lowBatteryDeviceMode ? 0xfff97316 : BLUE, 0xffffffff, lowBatteryDeviceMode ? 0xfff97316 : BLUE);
-            lowBattery.setOnClickListener(v -> {
+            lowBatteryDeviceButton = smallButton("");
+            updateLowBatteryDeviceButton();
+            lowBatteryDeviceButton.setOnClickListener(v -> {
                 lowBatteryDeviceMode = !lowBatteryDeviceMode;
                 if (macSearchInput != null) {
                     macSearchInput.setText("");
                 }
-                showHome();
+                updateLowBatteryDeviceButton();
+                loadList(false);
             });
-            deviceActions.addView(lowBattery, new LinearLayout.LayoutParams(0, dp(44), 1));
+            deviceActions.addView(lowBatteryDeviceButton, new LinearLayout.LayoutParams(0, dp(44), 1));
 
             Button addMonitor = smallButton("+ 添加监控");
             styleButton(addMonitor, BLUE, 0xffffffff, BLUE);
@@ -7504,6 +7508,15 @@ public class MainActivity extends Activity {
         button.setMinHeight(0);
         button.setMinWidth(0);
         return button;
+    }
+
+    private void updateLowBatteryDeviceButton() {
+        if (lowBatteryDeviceButton == null) {
+            return;
+        }
+        int color = lowBatteryDeviceMode ? 0xfff97316 : BLUE;
+        lowBatteryDeviceButton.setText(lowBatteryDeviceMode ? "清除显示" : "低电设备");
+        styleButton(lowBatteryDeviceButton, color, 0xffffffff, color);
     }
 
     private void styleButton(Button button, int bgColor, int textColor, int strokeColor) {
