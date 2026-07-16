@@ -184,6 +184,7 @@ public class MainActivity extends Activity {
     private TextToSpeech alarmTts;
     private boolean alarmTtsReady = false;
     private String pendingAlarmSpeechText = "";
+    private int pendingAlarmSpeechRepeatCount = 1;
     private String lastSpokenAlarmKey = "";
     private long updateDownloadId = -1L;
     private AlertDialog updateDownloadDialog;
@@ -598,7 +599,7 @@ public class MainActivity extends Activity {
         panel.addView(tip, topMargin(dp(14)));
 
         TextView version = new TextView(this);
-        version.setText("作者 kunkun  版本号 1.0.75");
+        version.setText("作者 kunkun  版本号 1.0.76");
         version.setTextSize(13);
         version.setTextColor(0xffb7c9d9);
         version.setGravity(Gravity.CENTER);
@@ -1476,12 +1477,18 @@ public class MainActivity extends Activity {
         }
         stopAlarmSoundLoop();
         AlarmAlertController.vibrateOnce(getApplicationContext(), alarmVibrationEnabled());
-        speakAlarmText(text);
+        speakAlarmText(text, 3);
     }
 
     private void speakAlarmText(String text) {
+        speakAlarmText(text, 1);
+    }
+
+    private void speakAlarmText(String text, int repeatCount) {
+        int safeRepeatCount = Math.max(1, repeatCount);
         if (alarmTts == null) {
             pendingAlarmSpeechText = text;
+            pendingAlarmSpeechRepeatCount = safeRepeatCount;
             alarmTts = new TextToSpeech(getApplicationContext(), status -> {
                 alarmTtsReady = status == TextToSpeech.SUCCESS;
                 if (alarmTtsReady) {
@@ -1501,11 +1508,14 @@ public class MainActivity extends Activity {
                     }
                     if (pendingAlarmSpeechText.length() > 0) {
                         String pending = pendingAlarmSpeechText;
+                        int pendingRepeatCount = pendingAlarmSpeechRepeatCount;
                         pendingAlarmSpeechText = "";
-                        speakAlarmText(pending);
+                        pendingAlarmSpeechRepeatCount = 1;
+                        speakAlarmText(pending, pendingRepeatCount);
                     }
                 } else {
                     pendingAlarmSpeechText = "";
+                    pendingAlarmSpeechRepeatCount = 1;
                     handleAlarmTtsUnavailable();
                 }
             });
@@ -1513,18 +1523,27 @@ public class MainActivity extends Activity {
         }
         if (!alarmTtsReady) {
             pendingAlarmSpeechText = text;
+            pendingAlarmSpeechRepeatCount = safeRepeatCount;
             return;
         }
         try {
             if (Build.VERSION.SDK_INT >= 21) {
-                int result = alarmTts.speak(text, TextToSpeech.QUEUE_FLUSH, null, "alarm_tts_" + System.currentTimeMillis());
-                if (result == TextToSpeech.ERROR) {
-                    handleAlarmTtsUnavailable();
+                for (int i = 0; i < safeRepeatCount; i++) {
+                    int queueMode = i == 0 ? TextToSpeech.QUEUE_FLUSH : TextToSpeech.QUEUE_ADD;
+                    int result = alarmTts.speak(text, queueMode, null, "alarm_tts_" + System.currentTimeMillis() + "_" + i);
+                    if (result == TextToSpeech.ERROR) {
+                        handleAlarmTtsUnavailable();
+                        break;
+                    }
                 }
             } else {
-                int result = alarmTts.speak(text, TextToSpeech.QUEUE_FLUSH, null);
-                if (result == TextToSpeech.ERROR) {
-                    handleAlarmTtsUnavailable();
+                for (int i = 0; i < safeRepeatCount; i++) {
+                    int queueMode = i == 0 ? TextToSpeech.QUEUE_FLUSH : TextToSpeech.QUEUE_ADD;
+                    int result = alarmTts.speak(text, queueMode, null);
+                    if (result == TextToSpeech.ERROR) {
+                        handleAlarmTtsUnavailable();
+                        break;
+                    }
                 }
             }
         } catch (Exception ignored) {
@@ -1548,6 +1567,7 @@ public class MainActivity extends Activity {
 
     private void stopAlarmSpeech() {
         pendingAlarmSpeechText = "";
+        pendingAlarmSpeechRepeatCount = 1;
         if (alarmTts != null) {
             try {
                 alarmTts.stop();
