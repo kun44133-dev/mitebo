@@ -32,6 +32,7 @@ import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
 import android.provider.Settings;
+import android.speech.tts.TextToSpeech;
 import android.os.VibrationEffect;
 import android.os.Vibrator;
 import android.text.Editable;
@@ -77,6 +78,7 @@ import java.util.Date;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
@@ -85,6 +87,7 @@ public class MainActivity extends Activity {
     private static final String PREFS = "mitebo_iot";
     private static final String PREF_ALARM_SOUND_URI = "alarm_sound_uri";
     private static final String PREF_ALARM_SOUND_ENABLED = "alarm_sound_enabled";
+    private static final String PREF_ALARM_TTS_ENABLED = "alarm_tts_enabled";
     private static final String PREF_ALARM_VIBRATION_ENABLED = "alarm_vibration_enabled";
     private static final String PREF_OFFLINE_MOULD_ALARM_SOUND = "offline_mould_alarm_sound";
     private static final String PREF_BACKGROUND_ALARM_MONITOR = "background_alarm_monitor";
@@ -175,6 +178,10 @@ public class MainActivity extends Activity {
     private Ringtone activeAlarmRingtone;
     private boolean alarmSoundLooping = false;
     private boolean alarmVibrationLooping = false;
+    private TextToSpeech alarmTts;
+    private boolean alarmTtsReady = false;
+    private String pendingAlarmSpeechText = "";
+    private String lastSpokenAlarmKey = "";
     private long updateDownloadId = -1L;
     private AlertDialog updateDownloadDialog;
     private UpdateInfo activeUpdateInfo;
@@ -345,6 +352,7 @@ public class MainActivity extends Activity {
         refreshHandler.removeCallbacks(pressureRefresh);
         refreshHandler.removeCallbacks(alarmRefresh);
         stopAlarmSoundLoop();
+        stopAlarmSpeech();
         if (!isAppExpired() && token != null && token.length() > 0 && backgroundAlarmMonitorEnabled()) {
             startAlarmMonitorService();
         }
@@ -357,6 +365,7 @@ public class MainActivity extends Activity {
         refreshHandler.removeCallbacks(alarmRefresh);
         refreshHandler.removeCallbacks(updateDownloadPoller);
         stopAlarmSoundLoop();
+        shutdownAlarmTts();
         unregisterUpdateDownloadReceiver();
         if (updateDownloadDialog != null) {
             updateDownloadDialog.dismiss();
@@ -379,6 +388,7 @@ public class MainActivity extends Activity {
         refreshHandler.removeCallbacks(pressureRefresh);
         refreshHandler.removeCallbacks(alarmRefresh);
         stopAlarmSoundLoop();
+        stopAlarmSpeech();
         stopAlarmMonitorService();
         if (root == null) {
             return;
@@ -585,7 +595,7 @@ public class MainActivity extends Activity {
         panel.addView(tip, topMargin(dp(14)));
 
         TextView version = new TextView(this);
-        version.setText("作者 kunkun  版本号 1.0.73");
+        version.setText("作者 kunkun  版本号 1.0.74");
         version.setTextSize(13);
         version.setTextColor(0xffb7c9d9);
         version.setGravity(Gravity.CENTER);
@@ -1339,11 +1349,13 @@ public class MainActivity extends Activity {
         historyAlarmTotal = -1;
         lastSeenAlarmKey = "";
         lastAudibleAlarmKey = "";
+        lastSpokenAlarmKey = "";
         activeAlarmMouldIds.clear();
         offlineAlarmMouldIds.clear();
         visibleMouldAlarmIcons.clear();
         expandedAlarmIds.clear();
         stopAlarmSoundLoop();
+        stopAlarmSpeech();
         stopAlarmVibrationLoop();
         updateLauncherAlarmBadge();
         updateAlarmTabIconTint();
@@ -1407,13 +1419,18 @@ public class MainActivity extends Activity {
             loadList(false);
         }
         if (activeCount > 0) {
-            if (soundableCount > 0 && allowSound && newAudibleAlarm) {
+            if (soundableCount > 0 && allowSound && newAudibleAlarm && alarmTtsEnabled()) {
+                stopAlarmSoundLoop();
+                speakAlarm(alarmForKey(rows, latestAudibleKey), latestAudibleKey);
+            } else if (soundableCount > 0 && allowSound && newAudibleAlarm) {
                 startAlarmSoundLoop();
             } else if (soundableCount == 0) {
                 stopAlarmSoundLoop();
+                stopAlarmSpeech();
             }
         } else {
             stopAlarmSoundLoop();
+            stopAlarmSpeech();
         }
         if (oldCount != unreadAlarmCount || redrawTabs) {
             updateAlarmTabIconTint();
@@ -1430,6 +1447,176 @@ public class MainActivity extends Activity {
 
     private boolean shouldAlarmMakeSound(JSONObject alarm) {
         return isActiveAlarm(alarm) && (!isOfflineSensorAlarm(alarm) || offlineMouldAlarmSoundEnabled());
+    }
+
+    private JSONObject alarmForKey(JSONArray rows, String key) {
+        if (rows == null || key == null || key.length() == 0) {
+            return null;
+        }
+        for (int i = 0; i < rows.length(); i++) {
+            JSONObject alarm = rows.optJSONObject(i);
+            if (alarm != null && key.equals(alarmKey(alarm))) {
+                return alarm;
+            }
+        }
+        return null;
+    }
+
+    private void speakAlarm(JSONObject alarm, String key) {
+        if (!alarmTtsEnabled() || alarm == null || key == null || key.length() == 0 || key.equals(lastSpokenAlarmKey)) {
+            return;
+        }
+        lastSpokenAlarmKey = key;
+        String text = alarmSpeechText(alarm);
+        if (text.length() == 0) {
+            return;
+        }
+        stopAlarmSoundLoop();
+        AlarmAlertController.vibrateOnce(getApplicationContext(), alarmVibrationEnabled());
+        speakAlarmText(text);
+    }
+
+    private void speakAlarmText(String text) {
+        if (alarmTts == null) {
+            pendingAlarmSpeechText = text;
+            alarmTts = new TextToSpeech(getApplicationContext(), status -> {
+                alarmTtsReady = status == TextToSpeech.SUCCESS;
+                if (alarmTtsReady) {
+                    try {
+                        int lang = alarmTts.setLanguage(Locale.CHINA);
+                        if (lang == TextToSpeech.LANG_MISSING_DATA || lang == TextToSpeech.LANG_NOT_SUPPORTED) {
+                            lang = alarmTts.setLanguage(Locale.CHINESE);
+                        }
+                        if (lang == TextToSpeech.LANG_MISSING_DATA || lang == TextToSpeech.LANG_NOT_SUPPORTED) {
+                            handleAlarmTtsUnavailable();
+                            return;
+                        }
+                        alarmTts.setSpeechRate(0.95f);
+                    } catch (Exception ignored) {
+                        handleAlarmTtsUnavailable();
+                        return;
+                    }
+                    if (pendingAlarmSpeechText.length() > 0) {
+                        String pending = pendingAlarmSpeechText;
+                        pendingAlarmSpeechText = "";
+                        speakAlarmText(pending);
+                    }
+                } else {
+                    pendingAlarmSpeechText = "";
+                    handleAlarmTtsUnavailable();
+                }
+            });
+            return;
+        }
+        if (!alarmTtsReady) {
+            pendingAlarmSpeechText = text;
+            return;
+        }
+        try {
+            if (Build.VERSION.SDK_INT >= 21) {
+                int result = alarmTts.speak(text, TextToSpeech.QUEUE_FLUSH, null, "alarm_tts_" + System.currentTimeMillis());
+                if (result == TextToSpeech.ERROR) {
+                    handleAlarmTtsUnavailable();
+                }
+            } else {
+                int result = alarmTts.speak(text, TextToSpeech.QUEUE_FLUSH, null);
+                if (result == TextToSpeech.ERROR) {
+                    handleAlarmTtsUnavailable();
+                }
+            }
+        } catch (Exception ignored) {
+            handleAlarmTtsUnavailable();
+        }
+    }
+
+    private void handleAlarmTtsUnavailable() {
+        refreshHandler.post(() -> {
+            pendingAlarmSpeechText = "";
+            getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                    .putBoolean(PREF_ALARM_TTS_ENABLED, false)
+                    .putBoolean(PREF_ALARM_SOUND_ENABLED, true)
+                    .apply();
+            toast("当前手机语音引擎不可用，已切回报警声音");
+            if (currentTab == 3) {
+                showHome();
+            }
+        });
+    }
+
+    private void stopAlarmSpeech() {
+        pendingAlarmSpeechText = "";
+        if (alarmTts != null) {
+            try {
+                alarmTts.stop();
+            } catch (Exception ignored) {
+            }
+        }
+    }
+
+    private void shutdownAlarmTts() {
+        stopAlarmSpeech();
+        if (alarmTts != null) {
+            try {
+                alarmTts.shutdown();
+            } catch (Exception ignored) {
+            }
+            alarmTts = null;
+        }
+        alarmTtsReady = false;
+    }
+
+    private String alarmSpeechText(JSONObject alarm) {
+        JSONArray details = alarmDetails(alarm);
+        JSONObject sensor = details == null || details.length() == 0 ? null : details.optJSONObject(0);
+        String mould = alarmMouldSummaryNumber(alarm, sensor);
+        if (mould.length() == 0 || "-".equals(mould)) {
+            mould = "未知模具";
+        }
+        String sensorName = sensor == null ? "" : alarmSensorSummaryName(sensor);
+        if (sensorName.length() == 0 || "未知传感器".equals(sensorName)) {
+            sensorName = alarmSpeechSensorFallback(alarm, sensor);
+        }
+        String type = alarmSpeechType(alarm, sensor);
+        String pressure = sensor == null ? "" : firstValue(sensor, "pressure", "realPressure", "value");
+        if (pressure.length() == 0) {
+            pressure = firstValue(alarm, "pressure", "realPressure", "value");
+        }
+        StringBuilder builder = new StringBuilder();
+        builder.append("模具 ").append(mould).append("，");
+        if (sensorName.length() > 0) {
+            builder.append(sensorName);
+        }
+        builder.append(type);
+        if (!"电量低".equals(type) && pressure.length() > 0) {
+            builder.append("，报警压力 ").append(pressureWithUnit(pressure));
+        }
+        return builder.toString();
+    }
+
+    private String alarmSpeechSensorFallback(JSONObject alarm, JSONObject sensor) {
+        String value = sensor == null ? "" : firstValue(sensor, "number", "deviceNumber", "mac", "macAddress");
+        if (value.length() == 0) {
+            value = firstValue(alarm, "deviceNumber", "number", "mac", "macAddress");
+        }
+        if (value.length() > 6) {
+            return "传感器" + value.substring(value.length() - 6);
+        }
+        return value.length() == 0 ? "传感器" : "传感器" + value;
+    }
+
+    private String alarmSpeechType(JSONObject alarm, JSONObject sensor) {
+        String text = ((alarm == null ? "" : alarmTitle(alarm)) + " "
+                + (alarm == null ? "" : alarm.optString("title")) + " "
+                + (alarm == null ? "" : alarm.optString("name")) + " "
+                + (alarm == null ? "" : alarm.optString("message")) + " "
+                + (sensor == null ? "" : sensor.optString("remark"))).toLowerCase();
+        if (text.contains("电量") || text.contains("battery")) {
+            return "电量低";
+        }
+        if (text.contains("上限") || text.contains("高") || text.contains("upper")) {
+            return "压力高";
+        }
+        return "压力低";
     }
 
     private String alarmMouldId(JSONObject alarm) {
@@ -1654,7 +1841,11 @@ public class MainActivity extends Activity {
     }
 
     private boolean alarmSoundEnabled() {
-        return getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean(PREF_ALARM_SOUND_ENABLED, true);
+        return !alarmTtsEnabled() && getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean(PREF_ALARM_SOUND_ENABLED, true);
+    }
+
+    private boolean alarmTtsEnabled() {
+        return getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean(PREF_ALARM_TTS_ENABLED, false);
     }
 
     private boolean alarmVibrationEnabled() {
@@ -1862,11 +2053,17 @@ public class MainActivity extends Activity {
     }
 
     private void applyDebugBadgeIntent(Intent intent) {
-        if (intent == null || !intent.hasExtra("test_alarm_badge")) {
+        if (intent == null) {
             return;
         }
-        unreadAlarmCount = Math.max(0, intent.getIntExtra("test_alarm_badge", 0));
-        updateLauncherAlarmBadge();
+        if (intent.hasExtra("test_alarm_badge")) {
+            unreadAlarmCount = Math.max(0, intent.getIntExtra("test_alarm_badge", 0));
+            updateLauncherAlarmBadge();
+        }
+        if (intent.getBooleanExtra("test_alarm_tts", false)) {
+            speakAlarmText("模具 C155，下模1区压力低，报警压力 77.6 bar");
+            toast("已触发测试语音播报");
+        }
     }
 
     private int countNewAlarms(JSONArray rows, String previousLatestKey) {
@@ -2479,13 +2676,41 @@ public class MainActivity extends Activity {
                 (buttonView, isChecked) -> {
             getSharedPreferences(PREFS, MODE_PRIVATE).edit()
                     .putBoolean(PREF_ALARM_SOUND_ENABLED, isChecked)
+                    .putBoolean(PREF_ALARM_TTS_ENABLED, isChecked ? false : alarmTtsEnabled())
                     .apply();
             if (!isChecked) {
                 stopAlarmSoundLoop();
             } else if (audibleAlarmCount > 0) {
+                stopAlarmSpeech();
                 startAlarmSoundLoop();
             }
+            if (isChecked) {
+                showHome();
+            }
         }), topMargin(dp(8)));
+        preferenceCard.addView(settingsDivider());
+        preferenceCard.addView(settingsSwitchRow(
+                "语音播报",
+                "播报模具、传感器和报警压力",
+                alarmTtsEnabled(),
+                (buttonView, isChecked) -> {
+            getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                    .putBoolean(PREF_ALARM_TTS_ENABLED, isChecked)
+                    .putBoolean(PREF_ALARM_SOUND_ENABLED, isChecked ? false : alarmSoundEnabled())
+                    .apply();
+            if (isChecked) {
+                stopAlarmSoundLoop();
+                toast("语音播报已开启，报警声音已关闭");
+                speakAlarmText("语音播报测试成功");
+            } else {
+                stopAlarmSpeech();
+            }
+            showHome();
+        }));
+        preferenceCard.addView(settingsDivider());
+        TextView testTts = settingsAction("测试");
+        testTts.setOnClickListener(v -> speakAlarmText("语音播报测试成功"));
+        preferenceCard.addView(settingsActionRow("测试语音", "测试当前手机是否能播报中文语音", testTts));
         preferenceCard.addView(settingsDivider());
         preferenceCard.addView(settingsSwitchRow(
                 "报警震动",
@@ -3007,6 +3232,7 @@ public class MainActivity extends Activity {
         SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
         String alarmSoundUri = prefs.getString(PREF_ALARM_SOUND_URI, null);
         boolean alarmSound = prefs.getBoolean(PREF_ALARM_SOUND_ENABLED, true);
+        boolean alarmTts = prefs.getBoolean(PREF_ALARM_TTS_ENABLED, false);
         boolean alarmVibration = prefs.getBoolean(PREF_ALARM_VIBRATION_ENABLED, true);
         boolean offlineAlarmSound = prefs.getBoolean(PREF_OFFLINE_MOULD_ALARM_SOUND, false);
         boolean backgroundMonitor = prefs.getBoolean(PREF_BACKGROUND_ALARM_MONITOR, false);
@@ -3018,6 +3244,7 @@ public class MainActivity extends Activity {
 
         SharedPreferences.Editor editor = prefs.edit().clear()
                 .putBoolean(PREF_ALARM_SOUND_ENABLED, alarmSound)
+                .putBoolean(PREF_ALARM_TTS_ENABLED, alarmTts)
                 .putBoolean(PREF_ALARM_VIBRATION_ENABLED, alarmVibration)
                 .putBoolean(PREF_OFFLINE_MOULD_ALARM_SOUND, offlineAlarmSound)
                 .putBoolean(PREF_BACKGROUND_ALARM_MONITOR, backgroundMonitor)
