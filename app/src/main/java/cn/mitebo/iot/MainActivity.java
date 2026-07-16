@@ -81,6 +81,8 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 public class MainActivity extends Activity {
     private static final String BASE_URL = "http://iot.mitebo.cn/prod-api";
@@ -94,6 +96,7 @@ public class MainActivity extends Activity {
     private static final String PREF_PRESSURE_UNIT = "pressure_unit";
     private static final String PREF_OFFLINE_ALARM_MOULD_IDS = "offline_alarm_mould_ids";
     private static final String PREF_LOWER_LIMIT_BACKUP_PREFIX = "lower_limit_backup_";
+    private static final Pattern SPEECH_CODE_TAIL = Pattern.compile("([A-Za-z]?\\d{2,5})$");
     private static final String GITHUB_RELEASE_API_URL =
             "https://api.github.com/repos/kun44133-dev/mitebo/releases/latest";
     private static final String[] GITHUB_PROXY_PREFIXES = {
@@ -595,7 +598,7 @@ public class MainActivity extends Activity {
         panel.addView(tip, topMargin(dp(14)));
 
         TextView version = new TextView(this);
-        version.setText("作者 kunkun  版本号 1.0.74");
+        version.setText("作者 kunkun  版本号 1.0.75");
         version.setTextSize(13);
         version.setTextColor(0xffb7c9d9);
         version.setGravity(Gravity.CENTER);
@@ -1568,11 +1571,11 @@ public class MainActivity extends Activity {
     private String alarmSpeechText(JSONObject alarm) {
         JSONArray details = alarmDetails(alarm);
         JSONObject sensor = details == null || details.length() == 0 ? null : details.optJSONObject(0);
-        String mould = alarmMouldSummaryNumber(alarm, sensor);
+        String mould = alarmSpeechMouldName(alarm, sensor);
         if (mould.length() == 0 || "-".equals(mould)) {
             mould = "未知模具";
         }
-        String sensorName = sensor == null ? "" : alarmSensorSummaryName(sensor);
+        String sensorName = alarmSpeechSensorName(alarm, sensor);
         if (sensorName.length() == 0 || "未知传感器".equals(sensorName)) {
             sensorName = alarmSpeechSensorFallback(alarm, sensor);
         }
@@ -1593,15 +1596,90 @@ public class MainActivity extends Activity {
         return builder.toString();
     }
 
+    private String alarmSpeechMouldName(JSONObject alarm, JSONObject sensor) {
+        JSONObject mould = alarm == null ? null : alarm.optJSONObject("mould");
+        if (mould == null && sensor != null) {
+            mould = sensor.optJSONObject("mould");
+        }
+        if (mould != null) {
+            String number = firstValue(mould, "number", "mouldNumber");
+            if (number.length() > 0) {
+                return readableCodeTail(number);
+            }
+            String name = firstValue(mould, "name", "mouldName");
+            if (name.length() > 0) {
+                return readableNameForSpeech(name);
+            }
+        }
+        String fallback = alarm == null ? "" : firstValue(alarm, "mouldNumber", "mould_number", "mouldName", "mould_name");
+        return fallback.length() == 0 ? "" : readableNameForSpeech(fallback);
+    }
+
+    private String alarmSpeechSensorName(JSONObject alarm, JSONObject sensor) {
+        String value = sensor == null ? "" : firstValue(sensor, "name", "deviceName");
+        if (value.length() == 0) {
+            value = alarm == null ? "" : firstValue(alarm, "deviceName", "sensorName", "name");
+        }
+        String readable = readableNameForSpeech(value);
+        if (readable.length() > 0 && !"-".equals(readable)) {
+            return readable;
+        }
+        return "";
+    }
+
     private String alarmSpeechSensorFallback(JSONObject alarm, JSONObject sensor) {
         String value = sensor == null ? "" : firstValue(sensor, "number", "deviceNumber", "mac", "macAddress");
         if (value.length() == 0) {
             value = firstValue(alarm, "deviceNumber", "number", "mac", "macAddress");
         }
-        if (value.length() > 6) {
-            return "传感器" + value.substring(value.length() - 6);
+        String tail = readableCodeTail(value);
+        return tail.length() == 0 || "-".equals(tail) ? "传感器" : "传感器尾号" + tail;
+    }
+
+    private String readableNameForSpeech(String value) {
+        String cleaned = clean(value).trim();
+        if (cleaned.length() == 0 || "-".equals(cleaned)) {
+            return "";
         }
-        return value.length() == 0 ? "传感器" : "传感器" + value;
+        String chinesePart = chineseSpeechPart(cleaned);
+        if (chinesePart.length() > 0) {
+            return chinesePart;
+        }
+        return readableCodeTail(cleaned);
+    }
+
+    private String chineseSpeechPart(String value) {
+        if (value == null) {
+            return "";
+        }
+        String cleaned = value.trim();
+        for (int i = 0; i < cleaned.length(); i++) {
+            char c = cleaned.charAt(i);
+            if (isChineseChar(c)) {
+                return cleaned.substring(i).replaceAll("\\s+", "");
+            }
+        }
+        return "";
+    }
+
+    private boolean isChineseChar(char c) {
+        return c >= '\u4e00' && c <= '\u9fff';
+    }
+
+    private String readableCodeTail(String value) {
+        String cleaned = clean(value).trim();
+        if (cleaned.length() == 0 || "-".equals(cleaned)) {
+            return "";
+        }
+        String normalized = cleaned.replaceAll("[^A-Za-z0-9]+", "");
+        Matcher matcher = SPEECH_CODE_TAIL.matcher(normalized);
+        if (matcher.find()) {
+            return matcher.group(1).toUpperCase(Locale.US);
+        }
+        if (normalized.length() > 6) {
+            return normalized.substring(normalized.length() - 6).toUpperCase(Locale.US);
+        }
+        return normalized.toUpperCase(Locale.US);
     }
 
     private String alarmSpeechType(JSONObject alarm, JSONObject sensor) {
