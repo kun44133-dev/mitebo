@@ -14,8 +14,10 @@ import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
+import android.os.PowerManager;
 import android.os.VibrationEffect;
 import android.os.Vibrator;
+import android.speech.tts.TextToSpeech;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -28,12 +30,16 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.text.SimpleDateFormat;
 import java.util.Date;
+import java.util.Locale;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 public class AlarmMonitorService extends Service {
     private static final String BASE_URL = "http://iot.mitebo.cn/prod-api";
     private static final String PREFS = "mitebo_iot";
     private static final String PREF_ALARM_SOUND_URI = "alarm_sound_uri";
     private static final String PREF_ALARM_SOUND_ENABLED = "alarm_sound_enabled";
+    private static final String PREF_ALARM_TTS_ENABLED = "alarm_tts_enabled";
     private static final String PREF_ALARM_VIBRATION_ENABLED = "alarm_vibration_enabled";
     private static final String PREF_OFFLINE_MOULD_ALARM_SOUND = "offline_mould_alarm_sound";
     private static final String PREF_BACKGROUND_ALARM_MONITOR = "background_alarm_monitor";
@@ -46,6 +52,7 @@ public class AlarmMonitorService extends Service {
     private static final int ALARM_PAGE_SIZE = 100;
     private static final int MAX_ALARM_PAGE_COUNT = 1;
     private static final long POLL_MS = 5000;
+    private static final Pattern SPEECH_CODE_TAIL = Pattern.compile("([A-Za-z]?\\d{2,5})$");
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private boolean polling = false;
@@ -53,9 +60,16 @@ public class AlarmMonitorService extends Service {
     private int pollGeneration = 0;
     private int activeAlarmCount = 0;
     private int audibleAlarmCount = 0;
+    private String lastAudibleAlarmKey = "";
+    private String lastSpokenAlarmKey = "";
     private Ringtone activeRingtone;
     private boolean alarmSoundLooping = false;
     private boolean alarmVibrationLooping = false;
+    private TextToSpeech alarmTts;
+    private boolean alarmTtsReady = false;
+    private String pendingAlarmSpeechText = "";
+    private int pendingAlarmSpeechRepeatCount = 1;
+    private PowerManager.WakeLock speechWakeLock;
 
     private final Runnable pollRunnable = new Runnable() {
         @Override
@@ -121,6 +135,7 @@ public class AlarmMonitorService extends Service {
     public void onDestroy() {
         invalidatePolling();
         stopAlarmSoundLoop();
+        shutdownAlarmTts();
         super.onDestroy();
     }
 
@@ -147,18 +162,15 @@ public class AlarmMonitorService extends Service {
         requestInFlight = true;
         int generation = pollGeneration;
         new Thread(() -> {
-            int count = activeAlarmCount;
-            int audible = audibleAlarmCount;
+            AlarmPollResult pollResult = new AlarmPollResult(activeAlarmCount, audibleAlarmCount, null, "");
             boolean ok = false;
             try {
                 JSONArray rows = fetchAlarmRows(tokenSnapshot);
-                count = countActiveAlarms(rows);
-                audible = countAudibleAlarms(rows);
+                pollResult = analyzeAlarmRows(rows);
                 ok = true;
             } catch (Exception ignored) {
             }
-            int finalCount = count;
-            int finalAudible = audible;
+            AlarmPollResult finalPollResult = pollResult;
             boolean finalOk = ok;
             handler.post(() -> {
                 if (generation != pollGeneration) {
@@ -179,7 +191,7 @@ public class AlarmMonitorService extends Service {
                     return;
                 }
                 if (finalOk) {
-                    applyAlarmCount(finalCount, finalAudible);
+                    applyAlarmState(finalPollResult);
                 }
                 handler.removeCallbacks(pollRunnable);
                 handler.postDelayed(pollRunnable, POLL_MS);
@@ -198,6 +210,7 @@ public class AlarmMonitorService extends Service {
         invalidatePolling();
         clearAlarmNotification();
         stopAlarmSoundLoop();
+        shutdownAlarmTts();
         if (Build.VERSION.SDK_INT >= 24) {
             stopForeground(STOP_FOREGROUND_REMOVE);
         } else {
@@ -297,6 +310,40 @@ public class AlarmMonitorService extends Service {
         return count;
     }
 
+    private AlarmPollResult analyzeAlarmRows(JSONArray rows) {
+        int activeCount = 0;
+        int audibleCount = 0;
+        JSONObject latestAudibleAlarm = null;
+        String latestAudibleKey = "";
+        if (rows != null) {
+            for (int i = 0; i < rows.length(); i++) {
+                JSONObject alarm = rows.optJSONObject(i);
+                if (alarm == null || !isActiveAlarm(alarm)) {
+                    continue;
+                }
+                activeCount++;
+                if (!shouldAlarmMakeSound(alarm)) {
+                    continue;
+                }
+                audibleCount++;
+                if (latestAudibleAlarm == null) {
+                    latestAudibleAlarm = alarm;
+                    latestAudibleKey = alarmKey(alarm);
+                }
+            }
+        }
+        return new AlarmPollResult(activeCount, audibleCount, latestAudibleAlarm, latestAudibleKey);
+    }
+
+    private boolean isActiveAlarm(JSONObject alarm) {
+        String state = firstValue(alarm, "state", "status", "type");
+        return state.length() == 0 || !isAlarmCleared(state);
+    }
+
+    private boolean shouldAlarmMakeSound(JSONObject alarm) {
+        return alarm != null && (!isOfflineSensorAlarm(alarm) || offlineMouldAlarmSoundEnabled());
+    }
+
     private boolean isOfflineSensorAlarm(JSONObject alarm) {
         if (alarm == null) {
             return false;
@@ -392,19 +439,36 @@ public class AlarmMonitorService extends Service {
         return false;
     }
 
-    private void applyAlarmCount(int count, int audibleCount) {
-        activeAlarmCount = Math.max(0, count);
-        audibleAlarmCount = Math.max(0, audibleCount);
+    private void applyAlarmState(AlarmPollResult result) {
+        if (result == null) {
+            return;
+        }
+        int oldAudibleCount = audibleAlarmCount;
+        String oldAudibleKey = lastAudibleAlarmKey;
+        activeAlarmCount = Math.max(0, result.activeCount);
+        audibleAlarmCount = Math.max(0, result.audibleCount);
+        lastAudibleAlarmKey = result.latestAudibleKey;
+        boolean newAudibleAlarm = audibleAlarmCount > oldAudibleCount
+                || (audibleAlarmCount >= oldAudibleCount && oldAudibleCount > 0 && result.latestAudibleKey.length() > 0 && !result.latestAudibleKey.equals(oldAudibleKey));
         if (activeAlarmCount > 0) {
             showAlarmNotification(activeAlarmCount);
             if (audibleAlarmCount > 0) {
-                startAlarmSoundLoop();
+                if (alarmTtsEnabled()) {
+                    stopAlarmSoundLoop();
+                    if (newAudibleAlarm) {
+                        speakAlarm(result.latestAudibleAlarm, result.latestAudibleKey);
+                    }
+                } else {
+                    startAlarmSoundLoop();
+                }
             } else {
                 stopAlarmSoundLoop();
+                stopAlarmSpeech();
             }
         } else {
             clearAlarmNotification();
             stopAlarmSoundLoop();
+            stopAlarmSpeech();
         }
         NotificationManager manager = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
         if (manager != null) {
@@ -433,6 +497,98 @@ public class AlarmMonitorService extends Service {
         }
     }
 
+    private void speakAlarm(JSONObject alarm, String key) {
+        if (!alarmTtsEnabled() || alarm == null || key == null || key.length() == 0 || key.equals(lastSpokenAlarmKey)) {
+            return;
+        }
+        lastSpokenAlarmKey = key;
+        String text = alarmSpeechText(alarm);
+        if (text.length() == 0) {
+            return;
+        }
+        holdSpeechWakeLock();
+        AlarmAlertController.vibrateOnce(getApplicationContext(), alarmVibrationEnabled());
+        speakAlarmText(text, 3);
+    }
+
+    private void speakAlarmText(String text, int repeatCount) {
+        int safeRepeatCount = Math.max(1, repeatCount);
+        if (alarmTts == null) {
+            pendingAlarmSpeechText = text;
+            pendingAlarmSpeechRepeatCount = safeRepeatCount;
+            alarmTts = new TextToSpeech(getApplicationContext(), status -> {
+                alarmTtsReady = status == TextToSpeech.SUCCESS;
+                if (alarmTtsReady) {
+                    try {
+                        int lang = alarmTts.setLanguage(Locale.CHINA);
+                        if (lang == TextToSpeech.LANG_MISSING_DATA || lang == TextToSpeech.LANG_NOT_SUPPORTED) {
+                            lang = alarmTts.setLanguage(Locale.CHINESE);
+                        }
+                        if (lang == TextToSpeech.LANG_MISSING_DATA || lang == TextToSpeech.LANG_NOT_SUPPORTED) {
+                            handleAlarmTtsUnavailable();
+                            return;
+                        }
+                        alarmTts.setSpeechRate(0.95f);
+                    } catch (Exception ignored) {
+                        handleAlarmTtsUnavailable();
+                        return;
+                    }
+                    if (pendingAlarmSpeechText.length() > 0) {
+                        String pending = pendingAlarmSpeechText;
+                        int pendingRepeatCount = pendingAlarmSpeechRepeatCount;
+                        pendingAlarmSpeechText = "";
+                        pendingAlarmSpeechRepeatCount = 1;
+                        speakAlarmText(pending, pendingRepeatCount);
+                    }
+                } else {
+                    pendingAlarmSpeechText = "";
+                    pendingAlarmSpeechRepeatCount = 1;
+                    handleAlarmTtsUnavailable();
+                }
+            });
+            return;
+        }
+        if (!alarmTtsReady) {
+            pendingAlarmSpeechText = text;
+            pendingAlarmSpeechRepeatCount = safeRepeatCount;
+            return;
+        }
+        try {
+            if (Build.VERSION.SDK_INT >= 21) {
+                for (int i = 0; i < safeRepeatCount; i++) {
+                    int queueMode = i == 0 ? TextToSpeech.QUEUE_FLUSH : TextToSpeech.QUEUE_ADD;
+                    int result = alarmTts.speak(text, queueMode, null, "alarm_monitor_tts_" + System.currentTimeMillis() + "_" + i);
+                    if (result == TextToSpeech.ERROR) {
+                        handleAlarmTtsUnavailable();
+                        break;
+                    }
+                }
+            } else {
+                for (int i = 0; i < safeRepeatCount; i++) {
+                    int queueMode = i == 0 ? TextToSpeech.QUEUE_FLUSH : TextToSpeech.QUEUE_ADD;
+                    int result = alarmTts.speak(text, queueMode, null);
+                    if (result == TextToSpeech.ERROR) {
+                        handleAlarmTtsUnavailable();
+                        break;
+                    }
+                }
+            }
+        } catch (Exception ignored) {
+            handleAlarmTtsUnavailable();
+        }
+    }
+
+    private void handleAlarmTtsUnavailable() {
+        pendingAlarmSpeechText = "";
+        pendingAlarmSpeechRepeatCount = 1;
+        prefs().edit()
+                .putBoolean(PREF_ALARM_TTS_ENABLED, false)
+                .putBoolean(PREF_ALARM_SOUND_ENABLED, true)
+                .apply();
+        releaseSpeechWakeLock();
+        startAlarmSoundLoop();
+    }
+
     private void stopAlarmSoundLoop() {
         handler.removeCallbacks(soundRepeater);
         alarmSoundLooping = false;
@@ -445,6 +601,54 @@ public class AlarmMonitorService extends Service {
             } catch (Exception ignored) {
             }
             activeRingtone = null;
+        }
+    }
+
+    private void stopAlarmSpeech() {
+        pendingAlarmSpeechText = "";
+        pendingAlarmSpeechRepeatCount = 1;
+        if (alarmTts != null) {
+            try {
+                alarmTts.stop();
+            } catch (Exception ignored) {
+            }
+        }
+        releaseSpeechWakeLock();
+    }
+
+    private void shutdownAlarmTts() {
+        stopAlarmSpeech();
+        if (alarmTts != null) {
+            try {
+                alarmTts.shutdown();
+            } catch (Exception ignored) {
+            }
+            alarmTts = null;
+        }
+        alarmTtsReady = false;
+    }
+
+    private void holdSpeechWakeLock() {
+        try {
+            PowerManager powerManager = (PowerManager) getSystemService(POWER_SERVICE);
+            if (powerManager == null) {
+                return;
+            }
+            if (speechWakeLock == null) {
+                speechWakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "mitebo:alarm-tts");
+                speechWakeLock.setReferenceCounted(false);
+            }
+            speechWakeLock.acquire(30000);
+        } catch (Exception ignored) {
+        }
+    }
+
+    private void releaseSpeechWakeLock() {
+        try {
+            if (speechWakeLock != null && speechWakeLock.isHeld()) {
+                speechWakeLock.release();
+            }
+        } catch (Exception ignored) {
         }
     }
 
@@ -542,8 +746,156 @@ public class AlarmMonitorService extends Service {
         return uri;
     }
 
+    private String alarmSpeechText(JSONObject alarm) {
+        JSONArray details = alarmDetails(alarm);
+        JSONObject sensor = details == null || details.length() == 0 ? null : details.optJSONObject(0);
+        String mould = alarmSpeechMouldName(alarm, sensor);
+        if (mould.length() == 0 || "-".equals(mould)) {
+            mould = "未知模具";
+        }
+        String sensorName = alarmSpeechSensorName(alarm, sensor);
+        if (sensorName.length() == 0 || "未知传感器".equals(sensorName)) {
+            sensorName = alarmSpeechSensorFallback(alarm, sensor);
+        }
+        String type = alarmSpeechType(alarm, sensor);
+        String pressure = sensor == null ? "" : firstValue(sensor, "pressure", "realPressure", "value");
+        if (pressure.length() == 0) {
+            pressure = firstValue(alarm, "pressure", "realPressure", "value");
+        }
+        StringBuilder builder = new StringBuilder();
+        builder.append("模具 ").append(mould).append("，");
+        if (sensorName.length() > 0) {
+            builder.append(sensorName);
+        }
+        builder.append(type);
+        if (!"电量低".equals(type) && pressure.length() > 0) {
+            builder.append("，报警压力 ").append(pressureWithUnit(pressure));
+        }
+        return builder.toString();
+    }
+
+    private String alarmSpeechMouldName(JSONObject alarm, JSONObject sensor) {
+        JSONObject mould = alarm == null ? null : alarm.optJSONObject("mould");
+        if (mould == null && sensor != null) {
+            mould = sensor.optJSONObject("mould");
+        }
+        if (mould != null) {
+            String number = firstValue(mould, "number", "mouldNumber");
+            if (number.length() > 0) {
+                return readableCodeTail(number);
+            }
+            String name = firstValue(mould, "name", "mouldName");
+            if (name.length() > 0) {
+                return readableNameForSpeech(name);
+            }
+        }
+        String fallback = alarm == null ? "" : firstValue(alarm, "mouldNumber", "mould_number", "mouldName", "mould_name");
+        return fallback.length() == 0 ? "" : readableNameForSpeech(fallback);
+    }
+
+    private String alarmSpeechSensorName(JSONObject alarm, JSONObject sensor) {
+        String value = sensor == null ? "" : firstValue(sensor, "name", "deviceName");
+        if (value.length() == 0) {
+            value = alarm == null ? "" : firstValue(alarm, "deviceName", "sensorName", "name");
+        }
+        String readable = readableNameForSpeech(value);
+        if (readable.length() > 0 && !"-".equals(readable)) {
+            return readable;
+        }
+        return "";
+    }
+
+    private String alarmSpeechSensorFallback(JSONObject alarm, JSONObject sensor) {
+        String value = sensor == null ? "" : firstValue(sensor, "number", "deviceNumber", "mac", "macAddress");
+        if (value.length() == 0) {
+            value = firstValue(alarm, "deviceNumber", "number", "mac", "macAddress");
+        }
+        String tail = readableCodeTail(value);
+        return tail.length() == 0 || "-".equals(tail) ? "传感器" : "传感器尾号" + tail;
+    }
+
+    private String alarmSpeechType(JSONObject alarm, JSONObject sensor) {
+        String text = ((alarm == null ? "" : alarm.optString("title")) + " "
+                + (alarm == null ? "" : alarm.optString("name")) + " "
+                + (alarm == null ? "" : alarm.optString("message")) + " "
+                + (sensor == null ? "" : sensor.optString("remark"))).toLowerCase();
+        if (text.contains("电量") || text.contains("battery")) {
+            return "电量低";
+        }
+        if (text.contains("上限") || text.contains("高") || text.contains("upper")) {
+            return "压力高";
+        }
+        return "压力低";
+    }
+
+    private String pressureWithUnit(String pressure) {
+        String value = pressure == null ? "" : pressure.trim();
+        return value.length() == 0 ? "" : value + " bar";
+    }
+
+    private String readableNameForSpeech(String value) {
+        String cleaned = clean(value).trim();
+        if (cleaned.length() == 0 || "-".equals(cleaned)) {
+            return "";
+        }
+        String chinesePart = chineseSpeechPart(cleaned);
+        if (chinesePart.length() > 0) {
+            return chinesePart;
+        }
+        return readableCodeTail(cleaned);
+    }
+
+    private String chineseSpeechPart(String value) {
+        if (value == null) {
+            return "";
+        }
+        String cleaned = value.trim();
+        for (int i = 0; i < cleaned.length(); i++) {
+            char c = cleaned.charAt(i);
+            if (isChineseChar(c)) {
+                return cleaned.substring(i).replaceAll("\\s+", "");
+            }
+        }
+        return "";
+    }
+
+    private boolean isChineseChar(char c) {
+        return c >= '\u4e00' && c <= '\u9fff';
+    }
+
+    private String readableCodeTail(String value) {
+        String cleaned = clean(value).trim();
+        if (cleaned.length() == 0 || "-".equals(cleaned)) {
+            return "";
+        }
+        String normalized = cleaned.replaceAll("[^A-Za-z0-9]+", "");
+        Matcher matcher = SPEECH_CODE_TAIL.matcher(normalized);
+        if (matcher.find()) {
+            return matcher.group(1).toUpperCase(Locale.US);
+        }
+        if (normalized.length() > 6) {
+            return normalized.substring(normalized.length() - 6).toUpperCase(Locale.US);
+        }
+        return normalized.toUpperCase(Locale.US);
+    }
+
+    private String alarmKey(JSONObject alarm) {
+        String id = firstValue(alarm, "id", "alarmId", "warnId", "recordId");
+        if (id.length() > 0) {
+            return id;
+        }
+        String time = firstValue(alarm, "createTime", "create_time", "alarmTime", "updateTime");
+        String device = firstValue(alarm, "deviceId", "deviceNumber", "number", "mac", "macAddress");
+        String state = firstValue(alarm, "state", "status", "type");
+        return time + "|" + device + "|" + state;
+    }
+
     private boolean alarmSoundEnabled() {
         return prefs().getBoolean(PREF_ALARM_SOUND_ENABLED, true);
+    }
+
+    private boolean alarmTtsEnabled() {
+        return prefs().getBoolean(PREF_ALARM_TTS_ENABLED, false);
     }
 
     private boolean alarmVibrationEnabled() {
@@ -594,6 +946,9 @@ public class AlarmMonitorService extends Service {
     }
 
     private String firstValue(JSONObject object, String... keys) {
+        if (object == null) {
+            return "";
+        }
         for (String key : keys) {
             String value = object.optString(key);
             if (value.length() > 0 && !"null".equals(value)) {
@@ -601,6 +956,13 @@ public class AlarmMonitorService extends Service {
             }
         }
         return "";
+    }
+
+    private String clean(String value) {
+        if (value == null || value.length() == 0 || "null".equals(value)) {
+            return "-";
+        }
+        return value;
     }
 
     private boolean isAlarmCleared(String status) {
@@ -628,5 +990,19 @@ public class AlarmMonitorService extends Service {
         }
         reader.close();
         return builder.toString();
+    }
+
+    private static class AlarmPollResult {
+        final int activeCount;
+        final int audibleCount;
+        final JSONObject latestAudibleAlarm;
+        final String latestAudibleKey;
+
+        AlarmPollResult(int activeCount, int audibleCount, JSONObject latestAudibleAlarm, String latestAudibleKey) {
+            this.activeCount = activeCount;
+            this.audibleCount = audibleCount;
+            this.latestAudibleAlarm = latestAudibleAlarm;
+            this.latestAudibleKey = latestAudibleKey == null ? "" : latestAudibleKey;
+        }
     }
 }

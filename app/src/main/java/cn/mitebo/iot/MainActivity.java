@@ -168,6 +168,7 @@ public class MainActivity extends Activity {
     private boolean alarmDateManuallySelected = false;
     private boolean alarmUnclearedOnly = false;
     private boolean alarmHistoryAllMode = false;
+    private boolean allowAlarmTotalDecreaseOnce = false;
     private long lastAlarmAllClickAt = 0;
     private boolean lowBatteryDeviceMode = false;
     private boolean offlineMouldMode = false;
@@ -599,7 +600,7 @@ public class MainActivity extends Activity {
         panel.addView(tip, topMargin(dp(14)));
 
         TextView version = new TextView(this);
-        version.setText("作者 kunkun  版本号 1.0.76");
+        version.setText("作者 kunkun  版本号 1.0.77");
         version.setTextSize(13);
         version.setTextColor(0xffb7c9d9);
         version.setGravity(Gravity.CENTER);
@@ -1035,7 +1036,9 @@ public class MainActivity extends Activity {
                     } else if (!alarmUnclearedOnly) {
                         String date = selectedAlarmDate();
                         int totalVersion = ++alarmTotalRequestVersion;
-                        updateTodayAlarmTotal(date, countSelectedDateAlarms(rows), false);
+                        boolean allowDecrease = allowAlarmTotalDecreaseOnce;
+                        allowAlarmTotalDecreaseOnce = false;
+                        updateTodayAlarmTotal(date, countSelectedDateAlarms(rows), allowDecrease);
                         if (rows != null && rows.length() >= ALARM_PAGE_SIZE) {
                             fetchAlarmDateTotalPage(date, 1, 0, totalVersion);
                         }
@@ -4782,21 +4785,56 @@ public class MainActivity extends Activity {
                 int code = json.optInt("code", 200);
                 toast(code == 200 ? "告警已删除" : json.optString("msg", "删除失败"));
                 if (code == 200) {
-                    refreshAfterAlarmDeleted(rowView);
+                    refreshAfterAlarmDeleted(item, rowView);
                 }
             } catch (Exception e) {
                 toast("告警已删除");
-                refreshAfterAlarmDeleted(rowView);
+                refreshAfterAlarmDeleted(item, rowView);
             }
         }).execute();
     }
 
-    private void refreshAfterAlarmDeleted(View rowView) {
+    private void refreshAfterAlarmDeleted(JSONObject item, View rowView) {
         if (rowView != null && rowView.getParent() instanceof ViewGroup) {
             ((ViewGroup) rowView.getParent()).removeView(rowView);
         }
+        applyLocalAlarmDeleteCounters(item);
+        allowAlarmTotalDecreaseOnce = true;
         loadList(false);
         fetchAlarmCount(true);
+    }
+
+    private void applyLocalAlarmDeleteCounters(JSONObject item) {
+        if (item == null) {
+            return;
+        }
+        boolean changed = false;
+        if (isActiveAlarm(item) && unreadAlarmCount > 0) {
+            unreadAlarmCount--;
+            changed = true;
+        }
+        if (isActiveAlarm(item) && shouldAlarmMakeSound(item) && audibleAlarmCount > 0) {
+            audibleAlarmCount--;
+        }
+        if (todayAlarmTotal > 0 && matchesAlarmDate(item, selectedAlarmDate())) {
+            todayAlarmTotal--;
+            changed = true;
+        }
+        if (historyAlarmTotal > 0) {
+            historyAlarmTotal--;
+        }
+        if (lastAlarmTotal > 0) {
+            lastAlarmTotal--;
+        }
+        updateAlarmAllChipText();
+        if (changed) {
+            updateLauncherAlarmBadge();
+            updateAlarmTabIconTint();
+            if (unreadAlarmCount == 0) {
+                stopAlarmSoundLoop();
+                stopAlarmSpeech();
+            }
+        }
     }
 
     private String alarmSummary(JSONObject item) {
