@@ -95,6 +95,7 @@ public class MainActivity extends Activity {
     private static final String PREF_BACKGROUND_ALARM_MONITOR = "background_alarm_monitor";
     private static final String PREF_PRESSURE_UNIT = "pressure_unit";
     private static final String PREF_OFFLINE_ALARM_MOULD_IDS = "offline_alarm_mould_ids";
+    private static final String PREF_ALARM_MOULD_STATE_LOCK_PREFIX = "alarm_mould_state_lock_";
     private static final String PREF_LOWER_LIMIT_BACKUP_PREFIX = "lower_limit_backup_";
     private static final Pattern SPEECH_CODE_TAIL = Pattern.compile("([A-Za-z]?\\d{2,5})$");
     private static final String GITHUB_RELEASE_API_URL =
@@ -220,6 +221,7 @@ public class MainActivity extends Activity {
     private final Map<String, Boolean> dynamicSeenByDevice = new HashMap<>();
     private final Map<String, Long> activeMouldUntil = new HashMap<>();
     private final Map<String, Boolean> mouldBusyById = new HashMap<>();
+    private final Map<String, Boolean> alarmMouldStateLockedOffline = new HashMap<>();
     private final Set<String> activeAlarmMouldIds = new HashSet<>();
     private final Set<String> offlineAlarmMouldIds = new HashSet<>();
     private final Map<String, TextView> visiblePressureViews = new HashMap<>();
@@ -600,7 +602,7 @@ public class MainActivity extends Activity {
         panel.addView(tip, topMargin(dp(14)));
 
         TextView version = new TextView(this);
-        version.setText("作者 kunkun  版本号 1.0.77");
+        version.setText("作者 kunkun  版本号 1.0.78");
         version.setTextSize(13);
         version.setTextColor(0xffb7c9d9);
         version.setGravity(Gravity.CENTER);
@@ -1094,6 +1096,9 @@ public class MainActivity extends Activity {
         for (int i = 0; i < rows.length(); i++) {
             JSONObject item = rows.optJSONObject(i);
             if (item != null && matchesDeviceQuery(item) && matchesSelectedAlarmDate(item) && matchesAlarmFilter(item)) {
+                if (currentTab == 1) {
+                    ensureAlarmMouldStateLocked(item);
+                }
                 content.addView(cardFor(item), topMargin(dp(10)));
                 added++;
             }
@@ -1111,6 +1116,7 @@ public class MainActivity extends Activity {
             if (isActiveAlarm(item) != activeFirst) {
                 continue;
             }
+            ensureAlarmMouldStateLocked(item);
             content.addView(cardFor(item), topMargin(dp(10)));
             added++;
         }
@@ -1359,6 +1365,7 @@ public class MainActivity extends Activity {
         lastSpokenAlarmKey = "";
         activeAlarmMouldIds.clear();
         offlineAlarmMouldIds.clear();
+        alarmMouldStateLockedOffline.clear();
         visibleMouldAlarmIcons.clear();
         expandedAlarmIds.clear();
         stopAlarmSoundLoop();
@@ -1394,6 +1401,7 @@ public class MainActivity extends Activity {
                 if (alarm == null || !isActiveAlarm(alarm)) {
                     continue;
                 }
+                ensureAlarmMouldStateLocked(alarm);
                 activeCount++;
                 String mouldId = alarmMouldId(alarm);
                 if (mouldId.length() > 0) {
@@ -1754,6 +1762,14 @@ public class MainActivity extends Activity {
     }
 
     private boolean isOfflineSensorAlarm(JSONObject alarm) {
+        Boolean locked = alarmLockedOfflineState(alarm);
+        if (locked != null) {
+            return locked;
+        }
+        return inferOfflineSensorAlarm(alarm);
+    }
+
+    private boolean inferOfflineSensorAlarm(JSONObject alarm) {
         if (alarm == null) {
             return false;
         }
@@ -1774,6 +1790,55 @@ public class MainActivity extends Activity {
         }
         String mouldId = alarmMouldId(alarm);
         return mouldId.length() > 0 && offlineAlarmMouldIds.contains(mouldId);
+    }
+
+    private void ensureAlarmMouldStateLocked(JSONObject alarm) {
+        String key = alarmMouldStateLockKey(alarm);
+        if (key.length() == 0 || alarmMouldStateLockedOffline.containsKey(key)) {
+            return;
+        }
+        SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+        if (prefs.contains(key)) {
+            alarmMouldStateLockedOffline.put(key, prefs.getBoolean(key, false));
+            return;
+        }
+        boolean offline = inferOfflineSensorAlarm(alarm);
+        alarmMouldStateLockedOffline.put(key, offline);
+        prefs.edit().putBoolean(key, offline).apply();
+    }
+
+    private Boolean alarmLockedOfflineState(JSONObject alarm) {
+        String key = alarmMouldStateLockKey(alarm);
+        if (key.length() == 0) {
+            return null;
+        }
+        if (alarmMouldStateLockedOffline.containsKey(key)) {
+            return alarmMouldStateLockedOffline.get(key);
+        }
+        SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+        if (!prefs.contains(key)) {
+            return null;
+        }
+        boolean offline = prefs.getBoolean(key, false);
+        alarmMouldStateLockedOffline.put(key, offline);
+        return offline;
+    }
+
+    private String alarmMouldStateLockKey(JSONObject alarm) {
+        String key = alarmKey(alarm);
+        if (key.length() == 0) {
+            return "";
+        }
+        String account = currentAccountName();
+        if (account.length() == 0) {
+            account = "guest";
+        }
+        return PREF_ALARM_MOULD_STATE_LOCK_PREFIX
+                + account.replaceAll("[^A-Za-z0-9_@.-]", "_")
+                + "_"
+                + Integer.toHexString(account.hashCode())
+                + "_"
+                + Integer.toHexString(key.hashCode());
     }
 
     private String alarmMouldStateLabel(JSONObject alarm) {
@@ -2629,7 +2694,7 @@ public class MainActivity extends Activity {
             TextView dot = new TextView(this);
             dot.setText("●");
             dot.setTextSize(14);
-            dot.setTextColor(GREEN);
+            dot.setTextColor(offlineMouldMode ? 0xfffff8e5 : GREEN);
             tip.addView(dot, new LinearLayout.LayoutParams(dp(22), ViewGroup.LayoutParams.WRAP_CONTENT));
             TextView text = new TextView(this);
             text.setText(gatewayManagementMode ? "当前显示网关信息与在线状态" : offlineMouldMode ? "当前显示压力不波动的离线模具" : "只显示在线模具（实时压力有波动）");
@@ -2808,10 +2873,6 @@ public class MainActivity extends Activity {
             }
             showHome();
         }));
-        preferenceCard.addView(settingsDivider());
-        TextView testTts = settingsAction("测试");
-        testTts.setOnClickListener(v -> speakAlarmText("语音播报测试成功"));
-        preferenceCard.addView(settingsActionRow("测试语音", "测试当前手机是否能播报中文语音", testTts));
         preferenceCard.addView(settingsDivider());
         preferenceCard.addView(settingsSwitchRow(
                 "报警震动",
