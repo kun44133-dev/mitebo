@@ -2694,7 +2694,7 @@ public class MainActivity extends Activity {
             TextView dot = new TextView(this);
             dot.setText("●");
             dot.setTextSize(14);
-            dot.setTextColor(offlineMouldMode ? 0xfffff8e5 : GREEN);
+            dot.setTextColor(offlineMouldMode ? 0xfff3d77a : GREEN);
             tip.addView(dot, new LinearLayout.LayoutParams(dp(22), ViewGroup.LayoutParams.WRAP_CONTENT));
             TextView text = new TextView(this);
             text.setText(gatewayManagementMode ? "当前显示网关信息与在线状态" : offlineMouldMode ? "当前显示压力不波动的离线模具" : "只显示在线模具（实时压力有波动）");
@@ -2867,7 +2867,7 @@ public class MainActivity extends Activity {
             if (isChecked) {
                 stopAlarmSoundLoop();
                 toast("语音播报已开启，报警声音已关闭");
-                speakAlarmText("语音播报测试成功");
+                speakAlarmText("语音播报开启");
             } else {
                 stopAlarmSpeech();
             }
