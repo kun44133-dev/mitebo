@@ -162,7 +162,7 @@ public class AlarmMonitorService extends Service {
         requestInFlight = true;
         int generation = pollGeneration;
         new Thread(() -> {
-            AlarmPollResult pollResult = new AlarmPollResult(activeAlarmCount, audibleAlarmCount, null, "");
+            AlarmPollResult pollResult = new AlarmPollResult(activeAlarmCount, audibleAlarmCount, null, null, "");
             boolean ok = false;
             try {
                 JSONArray rows = fetchAlarmRows(tokenSnapshot);
@@ -313,6 +313,7 @@ public class AlarmMonitorService extends Service {
     private AlarmPollResult analyzeAlarmRows(JSONArray rows) {
         int activeCount = 0;
         int audibleCount = 0;
+        JSONObject latestActiveAlarm = null;
         JSONObject latestAudibleAlarm = null;
         String latestAudibleKey = "";
         if (rows != null) {
@@ -322,6 +323,9 @@ public class AlarmMonitorService extends Service {
                     continue;
                 }
                 activeCount++;
+                if (latestActiveAlarm == null) {
+                    latestActiveAlarm = alarm;
+                }
                 if (!shouldAlarmMakeSound(alarm)) {
                     continue;
                 }
@@ -332,7 +336,7 @@ public class AlarmMonitorService extends Service {
                 }
             }
         }
-        return new AlarmPollResult(activeCount, audibleCount, latestAudibleAlarm, latestAudibleKey);
+        return new AlarmPollResult(activeCount, audibleCount, latestActiveAlarm, latestAudibleAlarm, latestAudibleKey);
     }
 
     private boolean isActiveAlarm(JSONObject alarm) {
@@ -451,7 +455,7 @@ public class AlarmMonitorService extends Service {
         boolean newAudibleAlarm = audibleAlarmCount > oldAudibleCount
                 || (audibleAlarmCount >= oldAudibleCount && oldAudibleCount > 0 && result.latestAudibleKey.length() > 0 && !result.latestAudibleKey.equals(oldAudibleKey));
         if (activeAlarmCount > 0) {
-            showAlarmNotification(activeAlarmCount);
+            showAlarmNotification(activeAlarmCount, result.latestActiveAlarm);
             if (audibleAlarmCount > 0) {
                 if (alarmTtsEnabled()) {
                     stopAlarmSoundLoop();
@@ -687,7 +691,7 @@ public class AlarmMonitorService extends Service {
         return builder.build();
     }
 
-    private void showAlarmNotification(int count) {
+    private void showAlarmNotification(int count, JSONObject latestAlarm) {
         NotificationManager manager = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
         if (manager == null || !canPostNotifications()) {
             return;
@@ -703,14 +707,20 @@ public class AlarmMonitorService extends Service {
         Notification.Builder builder = Build.VERSION.SDK_INT >= 26
                 ? new Notification.Builder(this, ALARM_CHANNEL_ID)
                 : new Notification.Builder(this);
+        String title = "有 " + count + " 条未消除告警";
+        String detail = alarmNotificationDetail(latestAlarm);
+        String content = detail.length() == 0 ? title : detail;
         builder.setSmallIcon(R.drawable.ic_alarm)
-                .setContentTitle("密特堡压力监测")
-                .setContentText("有 " + count + " 条未消除告警")
+                .setContentTitle(title)
+                .setContentText(content)
+                .setStyle(new Notification.BigTextStyle().bigText(content))
                 .setNumber(count)
                 .setContentIntent(pendingIntent)
                 .setAutoCancel(false)
                 .setOngoing(false)
-                .setShowWhen(false);
+                .setShowWhen(false)
+                .setVisibility(Notification.VISIBILITY_PUBLIC)
+                .setCategory(Notification.CATEGORY_ALARM);
         if (Build.VERSION.SDK_INT >= 26) {
             builder.setBadgeIconType(Notification.BADGE_ICON_SMALL);
         }
@@ -719,6 +729,84 @@ public class AlarmMonitorService extends Service {
         } catch (SecurityException ignored) {
         } catch (RuntimeException ignored) {
         }
+    }
+
+    private String alarmNotificationDetail(JSONObject alarm) {
+        if (alarm == null) {
+            return "";
+        }
+        JSONArray details = alarmDetails(alarm);
+        JSONObject sensor = details == null || details.length() == 0 ? null : details.optJSONObject(0);
+        String mould = alarmNotificationMouldName(alarm, sensor);
+        String sensorName = alarmNotificationSensorName(alarm, sensor);
+        String pressure = alarmNotificationPressure(alarm, sensor);
+        StringBuilder builder = new StringBuilder();
+        if (mould.length() > 0 && !"-".equals(mould)) {
+            builder.append("模具：").append(mould);
+        }
+        if (sensorName.length() > 0 && !"未知传感器".equals(sensorName)) {
+            if (builder.length() > 0) {
+                builder.append("  ");
+            }
+            builder.append("传感器：").append(sensorName);
+        }
+        if (pressure.length() > 0) {
+            if (builder.length() > 0) {
+                builder.append("  ");
+            }
+            builder.append("触发压力：").append(pressureWithUnit(pressure));
+        }
+        return builder.toString();
+    }
+
+    private String alarmNotificationMouldName(JSONObject alarm, JSONObject sensor) {
+        JSONObject mould = alarm == null ? null : alarm.optJSONObject("mould");
+        if (mould == null && sensor != null) {
+            mould = sensor.optJSONObject("mould");
+        }
+        if (mould != null) {
+            String number = firstValue(mould, "number", "mouldNumber");
+            String name = firstValue(mould, "name", "mouldName");
+            if (number.length() > 0 && name.length() > 0 && !number.equals(name)) {
+                return clean(number) + " " + clean(name);
+            }
+            if (number.length() > 0) {
+                return clean(number);
+            }
+            if (name.length() > 0) {
+                return clean(name);
+            }
+        }
+        String number = alarm == null ? "" : firstValue(alarm, "mouldNumber", "mould_number");
+        String name = alarm == null ? "" : firstValue(alarm, "mouldName", "mould_name");
+        if (number.length() > 0 && name.length() > 0 && !number.equals(name)) {
+            return clean(number) + " " + clean(name);
+        }
+        String fallback = number.length() > 0 ? number : name;
+        return fallback.length() == 0 ? "" : clean(fallback);
+    }
+
+    private String alarmNotificationSensorName(JSONObject alarm, JSONObject sensor) {
+        String name = sensor == null ? "" : firstValue(sensor, "name", "deviceName");
+        if (name.length() == 0) {
+            name = alarm == null ? "" : firstValue(alarm, "deviceName", "sensorName", "name");
+        }
+        if (name.length() > 0) {
+            return clean(name);
+        }
+        String fallback = sensor == null ? "" : firstValue(sensor, "number", "deviceNumber", "mac", "macAddress");
+        if (fallback.length() == 0 && alarm != null) {
+            fallback = firstValue(alarm, "deviceNumber", "number", "mac", "macAddress");
+        }
+        return fallback.length() == 0 ? "未知传感器" : clean(fallback);
+    }
+
+    private String alarmNotificationPressure(JSONObject alarm, JSONObject sensor) {
+        String pressure = sensor == null ? "" : firstValue(sensor, "pressure", "realPressure", "value");
+        if (pressure.length() == 0 && alarm != null) {
+            pressure = firstValue(alarm, "pressure", "realPressure", "value");
+        }
+        return pressure;
     }
 
     private void clearAlarmNotification() {
@@ -995,12 +1083,14 @@ public class AlarmMonitorService extends Service {
     private static class AlarmPollResult {
         final int activeCount;
         final int audibleCount;
+        final JSONObject latestActiveAlarm;
         final JSONObject latestAudibleAlarm;
         final String latestAudibleKey;
 
-        AlarmPollResult(int activeCount, int audibleCount, JSONObject latestAudibleAlarm, String latestAudibleKey) {
+        AlarmPollResult(int activeCount, int audibleCount, JSONObject latestActiveAlarm, JSONObject latestAudibleAlarm, String latestAudibleKey) {
             this.activeCount = activeCount;
             this.audibleCount = audibleCount;
+            this.latestActiveAlarm = latestActiveAlarm;
             this.latestAudibleAlarm = latestAudibleAlarm;
             this.latestAudibleKey = latestAudibleKey == null ? "" : latestAudibleKey;
         }
