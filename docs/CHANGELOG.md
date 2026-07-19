@@ -4,6 +4,16 @@
 
 ## 2026-07-19
 
+### 打包版本 1.0.81
+
+- `versionCode` 更新为 `81`，`versionName` 和登录页版本号更新为 `1.0.81`。
+- 本次安装包包含熄屏/锁屏告警通知字段格式调整。
+
+### 熄屏告警通知格式
+
+- 熄屏/锁屏告警通知信息条文案调整为 `模具名称：xxx  传感器：xxx  触发压力：xx bar`，与 App 内告警信息条字段口径保持一致。
+- 影响文件：`app/src/main/java/cn/mitebo/iot/AlarmMonitorService.java`。
+
 ### 打包版本 1.0.80
 
 - `versionCode` 更新为 `80`，`versionName` 和登录页版本号更新为 `1.0.80`。

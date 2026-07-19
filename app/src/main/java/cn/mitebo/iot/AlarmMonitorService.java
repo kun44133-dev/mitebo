@@ -742,7 +742,7 @@ public class AlarmMonitorService extends Service {
         String pressure = alarmNotificationPressure(alarm, sensor);
         StringBuilder builder = new StringBuilder();
         if (mould.length() > 0 && !"-".equals(mould)) {
-            builder.append("模具：").append(mould);
+            builder.append("模具名称：").append(mould);
         }
         if (sensorName.length() > 0 && !"未知传感器".equals(sensorName)) {
             if (builder.length() > 0) {
