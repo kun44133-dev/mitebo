@@ -4,6 +4,13 @@
 
 ## 2026-07-19
 
+### 打包版本 1.0.80
+
+- `versionCode` 更新为 `80`，`versionName` 和登录页版本号更新为 `1.0.80`。
+- 新增项目 Gradle Wrapper 文件，方便在其他电脑或 CI 上直接使用 `./gradlew` 构建。
+- Wrapper 固定使用 `Gradle 8.11.1`，与当前 Android Gradle Plugin `8.7.3` 保持兼容。
+- 影响文件：`app/build.gradle`、`app/src/main/java/cn/mitebo/iot/MainActivity.java`、`gradle/wrapper/gradle-wrapper.properties`、`gradlew`、`gradlew.bat`。
+
 ### 打包版本 1.0.79
 
 - `versionCode` 更新为 `79`，`versionName` 和登录页版本号更新为 `1.0.79`。
