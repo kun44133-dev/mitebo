@@ -430,7 +430,10 @@ public class AlarmMonitorService extends Service {
     }
 
     private boolean isKnownOfflineMould(String mouldId) {
-        String saved = prefs().getString(PREF_OFFLINE_ALARM_MOULD_IDS, "");
+        String saved = prefs().getString(offlineAlarmMouldIdsKey(), "");
+        if (saved.length() == 0) {
+            saved = prefs().getString(PREF_OFFLINE_ALARM_MOULD_IDS, "");
+        }
         if (saved.length() == 0) {
             return false;
         }
@@ -441,6 +444,19 @@ public class AlarmMonitorService extends Service {
             }
         }
         return false;
+    }
+
+    private String offlineAlarmMouldIdsKey() {
+        String account = currentAccountName();
+        if (account.length() == 0) {
+            return PREF_OFFLINE_ALARM_MOULD_IDS + "_guest";
+        }
+        String safe = account.replaceAll("[^A-Za-z0-9_@.-]", "_");
+        return PREF_OFFLINE_ALARM_MOULD_IDS + "_" + safe + "_" + Integer.toHexString(account.hashCode());
+    }
+
+    private String currentAccountName() {
+        return prefs().getString("saved_username", "").trim();
     }
 
     private void applyAlarmState(AlarmPollResult result) {
@@ -742,13 +758,13 @@ public class AlarmMonitorService extends Service {
         String pressure = alarmNotificationPressure(alarm, sensor);
         StringBuilder builder = new StringBuilder();
         if (mould.length() > 0 && !"-".equals(mould)) {
-            builder.append("模具名称：").append(mould);
+            builder.append(mould);
         }
         if (sensorName.length() > 0 && !"未知传感器".equals(sensorName)) {
             if (builder.length() > 0) {
                 builder.append("  ");
             }
-            builder.append("传感器：").append(sensorName);
+            builder.append(sensorName);
         }
         if (pressure.length() > 0) {
             if (builder.length() > 0) {
@@ -766,23 +782,16 @@ public class AlarmMonitorService extends Service {
         }
         if (mould != null) {
             String number = firstValue(mould, "number", "mouldNumber");
-            String name = firstValue(mould, "name", "mouldName");
-            if (number.length() > 0 && name.length() > 0 && !number.equals(name)) {
-                return clean(number) + " " + clean(name);
-            }
             if (number.length() > 0) {
                 return clean(number);
             }
+            String name = firstValue(mould, "name", "mouldName");
             if (name.length() > 0) {
                 return clean(name);
             }
         }
         String number = alarm == null ? "" : firstValue(alarm, "mouldNumber", "mould_number");
-        String name = alarm == null ? "" : firstValue(alarm, "mouldName", "mould_name");
-        if (number.length() > 0 && name.length() > 0 && !number.equals(name)) {
-            return clean(number) + " " + clean(name);
-        }
-        String fallback = number.length() > 0 ? number : name;
+        String fallback = number.length() > 0 ? number : (alarm == null ? "" : firstValue(alarm, "mouldName", "mould_name"));
         return fallback.length() == 0 ? "" : clean(fallback);
     }
 

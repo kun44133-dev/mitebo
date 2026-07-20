@@ -224,6 +224,7 @@ public class MainActivity extends Activity {
     private final Map<String, Boolean> alarmMouldStateLockedOffline = new HashMap<>();
     private final Set<String> activeAlarmMouldIds = new HashSet<>();
     private final Set<String> offlineAlarmMouldIds = new HashSet<>();
+    private boolean offlineAlarmMouldIdsRestored = false;
     private final Map<String, TextView> visiblePressureViews = new HashMap<>();
     private final Map<String, TextView> visibleStandardViews = new HashMap<>();
     private final Map<String, TextView> visibleUpdateViews = new HashMap<>();
@@ -602,7 +603,7 @@ public class MainActivity extends Activity {
         panel.addView(tip, topMargin(dp(14)));
 
         TextView version = new TextView(this);
-        version.setText("作者 kunkun  版本号 1.0.81");
+        version.setText("作者 kunkun  版本号 1.0.82");
         version.setTextSize(13);
         version.setTextColor(0xffb7c9d9);
         version.setGravity(Gravity.CENTER);
@@ -857,6 +858,7 @@ public class MainActivity extends Activity {
         fixedMouldGatewayCountView = null;
         fixedAlarmTitleView = null;
         fixedAlarmHintView = null;
+        restoreOfflineAlarmMouldIds();
         LinearLayout page = new LinearLayout(this);
         page.setOrientation(LinearLayout.VERTICAL);
         page.setBackgroundColor(PAGE_BG);
@@ -1365,6 +1367,7 @@ public class MainActivity extends Activity {
         lastSpokenAlarmKey = "";
         activeAlarmMouldIds.clear();
         offlineAlarmMouldIds.clear();
+        offlineAlarmMouldIdsRestored = false;
         alarmMouldStateLockedOffline.clear();
         visibleMouldAlarmIcons.clear();
         expandedAlarmIds.clear();
@@ -1763,16 +1766,22 @@ public class MainActivity extends Activity {
 
     private boolean isOfflineSensorAlarm(JSONObject alarm) {
         Boolean locked = alarmLockedOfflineState(alarm);
+        boolean inferred = inferOfflineSensorAlarm(alarm);
         if (locked != null) {
+            if (!locked && inferred) {
+                updateAlarmMouldStateLock(alarm, true);
+                return true;
+            }
             return locked;
         }
-        return inferOfflineSensorAlarm(alarm);
+        return inferred;
     }
 
     private boolean inferOfflineSensorAlarm(JSONObject alarm) {
         if (alarm == null) {
             return false;
         }
+        restoreOfflineAlarmMouldIds();
         String text = (alarm.optString("title") + " "
                 + alarm.optString("name") + " "
                 + alarm.optString("type") + " "
@@ -1799,7 +1808,13 @@ public class MainActivity extends Activity {
         }
         SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
         if (prefs.contains(key)) {
-            alarmMouldStateLockedOffline.put(key, prefs.getBoolean(key, false));
+            boolean locked = prefs.getBoolean(key, false);
+            boolean inferred = inferOfflineSensorAlarm(alarm);
+            boolean offline = locked || inferred;
+            alarmMouldStateLockedOffline.put(key, offline);
+            if (offline != locked) {
+                prefs.edit().putBoolean(key, true).apply();
+            }
             return;
         }
         boolean offline = inferOfflineSensorAlarm(alarm);
@@ -1822,6 +1837,17 @@ public class MainActivity extends Activity {
         boolean offline = prefs.getBoolean(key, false);
         alarmMouldStateLockedOffline.put(key, offline);
         return offline;
+    }
+
+    private void updateAlarmMouldStateLock(JSONObject alarm, boolean offline) {
+        String key = alarmMouldStateLockKey(alarm);
+        if (key.length() == 0) {
+            return;
+        }
+        alarmMouldStateLockedOffline.put(key, offline);
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                .putBoolean(key, offline)
+                .apply();
     }
 
     private String alarmMouldStateLockKey(JSONObject alarm) {
@@ -4124,8 +4150,41 @@ public class MainActivity extends Activity {
             builder.append(id);
         }
         getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                .putString(offlineAlarmMouldIdsKey(), builder.toString())
                 .putString(PREF_OFFLINE_ALARM_MOULD_IDS, builder.toString())
                 .apply();
+        offlineAlarmMouldIdsRestored = true;
+    }
+
+    private void restoreOfflineAlarmMouldIds() {
+        if (offlineAlarmMouldIdsRestored) {
+            return;
+        }
+        offlineAlarmMouldIds.clear();
+        SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+        String saved = prefs.getString(offlineAlarmMouldIdsKey(), "");
+        if (saved.length() == 0) {
+            saved = prefs.getString(PREF_OFFLINE_ALARM_MOULD_IDS, "");
+        }
+        if (saved.length() > 0) {
+            String[] ids = saved.split(",");
+            for (String id : ids) {
+                String value = id == null ? "" : id.trim();
+                if (value.length() > 0) {
+                    offlineAlarmMouldIds.add(value);
+                }
+            }
+        }
+        offlineAlarmMouldIdsRestored = true;
+    }
+
+    private String offlineAlarmMouldIdsKey() {
+        String account = currentAccountName();
+        if (account.length() == 0) {
+            return PREF_OFFLINE_ALARM_MOULD_IDS + "_guest";
+        }
+        String safe = account.replaceAll("[^A-Za-z0-9_@.-]", "_");
+        return PREF_OFFLINE_ALARM_MOULD_IDS + "_" + safe + "_" + Integer.toHexString(account.hashCode());
     }
 
     private void updateStaticPressure(JSONObject device) {
