@@ -603,7 +603,7 @@ public class MainActivity extends Activity {
         panel.addView(tip, topMargin(dp(14)));
 
         TextView version = new TextView(this);
-        version.setText("作者 kunkun  版本号 1.0.82");
+        version.setText("作者 kunkun  版本号 1.0.83");
         version.setTextSize(13);
         version.setTextColor(0xffb7c9d9);
         version.setGravity(Gravity.CENTER);
@@ -2728,6 +2728,12 @@ public class MainActivity extends Activity {
             text.setTextColor(INK);
             tip.addView(text, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
             panel.addView(tip);
+            if (!gatewayManagementMode && !offlineMouldMode) {
+                Button addMould = smallButton("+ 添加模具");
+                styleButton(addMould, BLUE, 0xffffffff, BLUE);
+                addMould.setOnClickListener(v -> showAddMouldWithSensorsDialog());
+                panel.addView(addMould, fixedTop(ViewGroup.LayoutParams.MATCH_PARENT, dp(44), dp(10)));
+            }
         }
         page.addView(panel);
     }
@@ -7002,6 +7008,440 @@ public class MainActivity extends Activity {
         }
     }
 
+    private void showAddMouldWithSensorsDialog() {
+        setLoading(true);
+        new AsyncTask<Void, Void, AddMouldOptions>() {
+            @Override
+            protected AddMouldOptions doInBackground(Void... voids) {
+                AddMouldOptions options = new AddMouldOptions();
+                options.depts.add(new OptionItem("", "请选择组织"));
+                try {
+                    JSONObject deptJson = requestJson("GET", "/system/user/deptTree", null, true);
+                    flattenDeptOptions(deptJson.optJSONArray("data"), options.depts, "");
+                } catch (Exception ignored) {
+                }
+                try {
+                    loadAddMouldSensorOptions(options.sensors);
+                } catch (Exception e) {
+                    options.error = "传感器列表加载失败";
+                }
+                return options;
+            }
+
+            @Override
+            protected void onPostExecute(AddMouldOptions options) {
+                if (!isActivityUsable()) {
+                    return;
+                }
+                setLoading(false);
+                if (options.sensors.size() == 0) {
+                    toast(options.error.length() > 0 ? options.error : "暂无可选择传感器");
+                    return;
+                }
+                showAddMouldWithSensorsEditor(options);
+            }
+        }.execute();
+    }
+
+    private void loadAddMouldSensorOptions(List<JSONObject> output) throws Exception {
+        int pageNum = 1;
+        int pageSize = 100;
+        while (pageNum <= 100) {
+            JSONObject json = requestJson(
+                    "GET",
+                    "/yujing/device/list?pageNum=" + pageNum + "&pageSize=" + pageSize,
+                    null,
+                    true
+            );
+            JSONArray rows = json.optJSONArray("rows");
+            if (rows == null || rows.length() == 0) {
+                break;
+            }
+            for (int i = 0; i < rows.length(); i++) {
+                JSONObject sensor = rows.optJSONObject(i);
+                if (sensor != null) {
+                    output.add(sensor);
+                }
+            }
+            int total = json.optInt("total", -1);
+            if (rows.length() < pageSize || (total >= 0 && pageNum * pageSize >= total)) {
+                break;
+            }
+            pageNum++;
+        }
+    }
+
+    private void showAddMouldWithSensorsEditor(AddMouldOptions options) {
+        LinearLayout form = new LinearLayout(this);
+        form.setOrientation(LinearLayout.VERTICAL);
+        form.setPadding(dp(14), dp(4), dp(14), dp(8));
+
+        TextView hint = meta("点击在线模具页添加模具按钮打开，保存后同步新增模具并逐个绑定传感器");
+        form.addView(hint);
+
+        Spinner dept = spinner(options.depts, "");
+        EditText number = input("模具编号", false);
+        EditText name = input("模具名称", false);
+        EditText customer = input("客户", false);
+        EditText remark = input("备注", false);
+
+        form.addView(label("模具信息"));
+        form.addView(label("组织"));
+        form.addView(dept, fixedTop(ViewGroup.LayoutParams.MATCH_PARENT, dp(44), dp(2)));
+        form.addView(label("模具编号"));
+        form.addView(number, fixedTop(ViewGroup.LayoutParams.MATCH_PARENT, dp(44), dp(2)));
+        form.addView(label("模具名称"));
+        form.addView(name, fixedTop(ViewGroup.LayoutParams.MATCH_PARENT, dp(44), dp(4)));
+        form.addView(label("客户"));
+        form.addView(customer, fixedTop(ViewGroup.LayoutParams.MATCH_PARENT, dp(44), dp(4)));
+        form.addView(label("备注"));
+        form.addView(remark, fixedTop(ViewGroup.LayoutParams.MATCH_PARENT, dp(44), dp(4)));
+
+        TextView sensorTitle = label("绑定传感器");
+        sensorTitle.setPadding(0, dp(14), 0, 0);
+        form.addView(sensorTitle);
+        LinearLayout selectedSensors = new LinearLayout(this);
+        selectedSensors.setOrientation(LinearLayout.VERTICAL);
+        form.addView(selectedSensors);
+
+        Button addSensor = smallButton("+ 添加一个传感器");
+        styleButton(addSensor, 0xffe8fbff, 0xff0891b2, 0xffb7e8f2);
+        form.addView(addSensor, fixedTop(ViewGroup.LayoutParams.MATCH_PARENT, dp(42), dp(8)));
+
+        List<AddMouldSensorDraft> drafts = new ArrayList<>();
+        addSensor.setOnClickListener(v -> showAddMouldSensorPickerDialog(options.sensors, drafts, selectedSensors));
+        renderAddMouldSensorDrafts(drafts, selectedSensors);
+
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(form, new ScrollView.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle("添加模具并绑定传感器")
+                .setView(scroll)
+                .setNegativeButton("取消", null)
+                .setPositiveButton("保存并绑定", null)
+                .create();
+        dialog.setOnShowListener(d -> {
+            if (dialog.getWindow() != null) {
+                int width = (int) (getResources().getDisplayMetrics().widthPixels * 0.94f);
+                dialog.getWindow().setLayout(width, ViewGroup.LayoutParams.WRAP_CONTENT);
+            }
+            styleDialogButtons(dialog);
+            Button positive = dialog.getButton(DialogInterface.BUTTON_POSITIVE);
+            if (positive != null) {
+                positive.setOnClickListener(v -> {
+                    String mouldNumber = number.getText().toString().trim();
+                    String mouldName = name.getText().toString().trim();
+                    if (mouldNumber.length() == 0) {
+                        toast("请输入模具编号");
+                        return;
+                    }
+                    if (mouldName.length() == 0) {
+                        toast("请输入模具名称");
+                        return;
+                    }
+                    if (drafts.size() == 0) {
+                        toast("请至少添加一个传感器");
+                        return;
+                    }
+                    dialog.dismiss();
+                    saveNewMouldWithSensors(
+                            dept,
+                            mouldNumber,
+                            mouldName,
+                            customer.getText().toString().trim(),
+                            remark.getText().toString().trim(),
+                            drafts
+                    );
+                });
+            }
+        });
+        showStyledDialog(dialog);
+    }
+
+    private void showAddMouldSensorPickerDialog(List<JSONObject> sensors, List<AddMouldSensorDraft> drafts, LinearLayout selectedSensors) {
+        LinearLayout list = new LinearLayout(this);
+        list.setOrientation(LinearLayout.VERTICAL);
+        list.setPadding(dp(12), dp(8), dp(12), dp(10));
+        TextView tip = meta("从系统传感器列表选择，一个传感器保存一条绑定信息");
+        list.addView(tip);
+
+        final AlertDialog[] picker = new AlertDialog[1];
+        int visibleCount = 0;
+        for (int i = 0; i < sensors.size(); i++) {
+            JSONObject sensor = sensors.get(i);
+            if (isSensorAlreadySelected(sensor, drafts)) {
+                continue;
+            }
+            visibleCount++;
+            TextView row = sensorPickRow(sensor);
+            row.setOnClickListener(v -> {
+                if (picker[0] != null) {
+                    picker[0].dismiss();
+                }
+                showAddMouldSensorEditor(sensor, drafts, selectedSensors);
+            });
+            list.addView(row, topMargin(dp(8)));
+        }
+        if (visibleCount == 0) {
+            list.addView(meta("可选传感器已全部添加"), topMargin(dp(10)));
+        }
+
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(list, new ScrollView.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+
+        picker[0] = new AlertDialog.Builder(this)
+                .setTitle("选择传感器")
+                .setView(scroll)
+                .setNegativeButton("关闭", null)
+                .create();
+        showStyledDialog(picker[0]);
+    }
+
+    private TextView sensorPickRow(JSONObject sensor) {
+        TextView row = new TextView(this);
+        String mac = firstNonEmpty(firstValue(sensor, "number", "deviceNumber", "mac", "macAddress"), primaryTitle(sensor));
+        String name = firstNonEmpty(firstValue(sensor, "name", "deviceName"), "未命名传感器");
+        String mouldName = "";
+        JSONObject mould = sensor.optJSONObject("mould");
+        if (mould != null) {
+            mouldName = mouldOptionLabel(mould);
+        }
+        row.setText("MAC：" + mac + "\n" + name + (mouldName.length() > 0 ? " · 已绑定：" + mouldName : " · 未绑定"));
+        row.setTextSize(13);
+        row.setTextColor(INK);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(dp(12), dp(8), dp(12), dp(8));
+        row.setBackground(roundedStroke(0xfffbfdff, 14, 0xffd8e4f1));
+        return row;
+    }
+
+    private void showAddMouldSensorEditor(JSONObject sensor, List<AddMouldSensorDraft> drafts, LinearLayout selectedSensors) {
+        LinearLayout form = new LinearLayout(this);
+        form.setOrientation(LinearLayout.VERTICAL);
+        form.setPadding(dp(14), dp(6), dp(14), dp(8));
+
+        TextView sensorMeta = meta("MAC：" + firstNonEmpty(firstValue(sensor, "number", "deviceNumber", "mac", "macAddress"), primaryTitle(sensor)));
+        EditText name = input("传感器名称", false);
+        name.setText(firstValue(sensor, "name", "deviceName"));
+        EditText lower = input("报警下限", false);
+        lower.setText(pressureInputValue(sensor.optString("lower")));
+        EditText upper = input("报警上限", false);
+        upper.setText(pressureInputValue(sensor.optString("upper")));
+
+        form.addView(sensorMeta);
+        form.addView(label("传感器名称"));
+        form.addView(name, fixedTop(ViewGroup.LayoutParams.MATCH_PARENT, dp(44), dp(4)));
+        form.addView(label("报警下限 (" + pressureUnitLabel() + ")"));
+        form.addView(lower, fixedTop(ViewGroup.LayoutParams.MATCH_PARENT, dp(44), dp(4)));
+        form.addView(label("报警上限 (" + pressureUnitLabel() + ")"));
+        form.addView(upper, fixedTop(ViewGroup.LayoutParams.MATCH_PARENT, dp(44), dp(4)));
+
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle("传感器绑定设置")
+                .setView(form)
+                .setNegativeButton("取消", null)
+                .setPositiveButton("添加", (d, which) -> {
+                    String sensorName = name.getText().toString().trim();
+                    if (sensorName.length() == 0) {
+                        toast("请输入传感器名称");
+                        return;
+                    }
+                    drafts.add(new AddMouldSensorDraft(
+                            sensor,
+                            sensorName,
+                            lower.getText().toString().trim(),
+                            upper.getText().toString().trim()
+                    ));
+                    renderAddMouldSensorDrafts(drafts, selectedSensors);
+                })
+                .create();
+        showStyledDialog(dialog);
+    }
+
+    private void renderAddMouldSensorDrafts(List<AddMouldSensorDraft> drafts, LinearLayout selectedSensors) {
+        selectedSensors.removeAllViews();
+        if (drafts.size() == 0) {
+            selectedSensors.addView(meta("暂未添加传感器，点击下方按钮从系统传感器列表选择"));
+            return;
+        }
+        for (int i = 0; i < drafts.size(); i++) {
+            AddMouldSensorDraft draft = drafts.get(i);
+            LinearLayout row = new LinearLayout(this);
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            row.setGravity(Gravity.CENTER_VERTICAL);
+            row.setPadding(dp(12), dp(8), dp(8), dp(8));
+            row.setBackground(roundedStroke(0xfffbfdff, 14, 0xffd8e4f1));
+
+            TextView text = new TextView(this);
+            text.setText((i + 1) + ". " + draft.name + "\nMAC：" + draft.sensorIdentity()
+                    + "  下限：" + emptyAsDash(draft.lower) + "  上限：" + emptyAsDash(draft.upper));
+            text.setTextSize(12);
+            text.setTextColor(INK);
+            text.setGravity(Gravity.CENTER_VERTICAL);
+            row.addView(text, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+
+            TextView remove = new TextView(this);
+            remove.setText("移除");
+            remove.setTextSize(12);
+            remove.setTextColor(RED);
+            remove.setGravity(Gravity.CENTER);
+            int index = i;
+            remove.setOnClickListener(v -> {
+                drafts.remove(index);
+                renderAddMouldSensorDrafts(drafts, selectedSensors);
+            });
+            row.addView(remove, new LinearLayout.LayoutParams(dp(48), dp(38)));
+            selectedSensors.addView(row, topMargin(dp(8)));
+        }
+    }
+
+    private void saveNewMouldWithSensors(Spinner dept, String number, String name, String customer, String remark, List<AddMouldSensorDraft> drafts) {
+        setLoading(true);
+        String deptId = selectedOptionValue(dept);
+        List<AddMouldSensorDraft> draftCopy = new ArrayList<>(drafts);
+        new AsyncTask<Void, Void, ApiResult>() {
+            @Override
+            protected ApiResult doInBackground(Void... voids) {
+                ApiResult result = new ApiResult();
+                try {
+                    JSONObject body = new JSONObject();
+                    body.put("number", number);
+                    body.put("name", name);
+                    body.put("customer", customer);
+                    body.put("remark", remark);
+                    if (deptId.length() > 0) {
+                        body.put("deptId", deptId);
+                    }
+                    JSONObject created = requestJson("POST", "/yujing/mould", body.toString(), true);
+                    int code = created.optInt("code", 200);
+                    if (code != 200) {
+                        result.ok = false;
+                        result.message = created.optString("msg", "模具添加失败");
+                        return result;
+                    }
+                    String mouldId = createdMouldId(created);
+                    if (mouldId.length() == 0) {
+                        mouldId = resolveMouldIdByNumber(number);
+                    }
+                    if (mouldId.length() == 0) {
+                        result.ok = false;
+                        result.message = "模具已添加，但未获取到模具 ID";
+                        return result;
+                    }
+                    int success = 0;
+                    int failed = 0;
+                    for (AddMouldSensorDraft draft : draftCopy) {
+                        try {
+                            JSONObject device = new JSONObject(draft.sensor.toString());
+                            device.put("mouldId", mouldId);
+                            device.put("name", draft.name);
+                            String lower = pressureInputToStorageValue(draft.lower);
+                            String upper = pressureInputToStorageValue(draft.upper);
+                            if (lower.length() > 0) {
+                                device.put("lower", lower);
+                            }
+                            if (upper.length() > 0) {
+                                device.put("upper", upper);
+                            }
+                            JSONObject saved = requestJson("PUT", "/yujing/device", device.toString(), true);
+                            if (saved.optInt("code", 200) == 200) {
+                                success++;
+                            } else {
+                                failed++;
+                            }
+                        } catch (Exception ignored) {
+                            failed++;
+                        }
+                    }
+                    result.ok = true;
+                    result.message = failed == 0
+                            ? "模具已添加，传感器已绑定"
+                            : "模具已添加，" + success + " 个传感器绑定成功，" + failed + " 个失败";
+                } catch (Exception e) {
+                    result.ok = false;
+                    result.message = "添加模具失败";
+                }
+                return result;
+            }
+
+            @Override
+            protected void onPostExecute(ApiResult result) {
+                if (!isActivityUsable()) {
+                    return;
+                }
+                setLoading(false);
+                toast(result.message);
+                if (result.ok) {
+                    mouldDropdownDeviceCache.clear();
+                    loadList(false);
+                }
+            }
+        }.execute();
+    }
+
+    private String createdMouldId(JSONObject created) {
+        JSONObject data = created == null ? null : created.optJSONObject("data");
+        if (data != null) {
+            String id = data.optString("id");
+            if (id.length() == 0) {
+                id = data.optString("mouldId");
+            }
+            return id;
+        }
+        return "";
+    }
+
+    private String resolveMouldIdByNumber(String number) {
+        try {
+            String keyword = URLEncoder.encode(number, "UTF-8");
+            JSONObject json = requestJson("GET", "/yujing/mould/list?pageNum=1&pageSize=20&number=" + keyword, null, true);
+            JSONArray rows = json.optJSONArray("rows");
+            if (rows == null) {
+                return "";
+            }
+            for (int i = 0; i < rows.length(); i++) {
+                JSONObject mould = rows.optJSONObject(i);
+                if (mould != null && number.equals(mould.optString("number"))) {
+                    return mould.optString("id");
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return "";
+    }
+
+    private boolean isSensorAlreadySelected(JSONObject sensor, List<AddMouldSensorDraft> drafts) {
+        String id = firstValue(sensor, "id", "deviceId", "sensorId", "number", "mac", "macAddress");
+        for (AddMouldSensorDraft draft : drafts) {
+            if (id.length() > 0 && id.equals(draft.identityKey())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private String selectedOptionValue(Spinner spinner) {
+        if (spinner == null) {
+            return "";
+        }
+        Object selected = spinner.getSelectedItem();
+        if (selected instanceof OptionItem) {
+            return ((OptionItem) selected).value;
+        }
+        return "";
+    }
+
+    private String emptyAsDash(String value) {
+        return value == null || value.trim().length() == 0 ? "-" : value.trim();
+    }
+
     private void loadDetailForEdit(JSONObject item) {
         String id = item.optString("id");
         if (id.length() == 0) {
@@ -8275,6 +8715,34 @@ public class MainActivity extends Activity {
     private static class OptionsState {
         final List<OptionItem> depts = new ArrayList<>();
         final List<OptionItem> moulds = new ArrayList<>();
+    }
+
+    private static class AddMouldOptions {
+        final List<OptionItem> depts = new ArrayList<>();
+        final List<JSONObject> sensors = new ArrayList<>();
+        String error = "";
+    }
+
+    private class AddMouldSensorDraft {
+        final JSONObject sensor;
+        final String name;
+        final String lower;
+        final String upper;
+
+        AddMouldSensorDraft(JSONObject sensor, String name, String lower, String upper) {
+            this.sensor = sensor;
+            this.name = name == null ? "" : name;
+            this.lower = lower == null ? "" : lower;
+            this.upper = upper == null ? "" : upper;
+        }
+
+        String identityKey() {
+            return firstValue(sensor, "id", "deviceId", "sensorId", "number", "mac", "macAddress");
+        }
+
+        String sensorIdentity() {
+            return firstNonEmpty(firstValue(sensor, "number", "deviceNumber", "mac", "macAddress"), primaryTitle(sensor));
+        }
     }
 
     private class OptionsTask extends AsyncTask<Void, Void, OptionsState> {
