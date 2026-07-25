@@ -603,7 +603,7 @@ public class MainActivity extends Activity {
         panel.addView(tip, topMargin(dp(14)));
 
         TextView version = new TextView(this);
-        version.setText("作者 kunkun  版本号 1.0.83");
+        version.setText("作者 kunkun  版本号 1.0.84");
         version.setTextSize(13);
         version.setTextColor(0xffb7c9d9);
         version.setGravity(Gravity.CENTER);
@@ -895,7 +895,7 @@ public class MainActivity extends Activity {
         if (currentTab != 2) {
             return dp(24);
         }
-        return dp(MOULD_TOGGLE_HEIGHT_DP + BOTTOM_NAV_HEIGHT_DP + 28);
+        return dp(MOULD_TOGGLE_HEIGHT_DP + BOTTOM_NAV_HEIGHT_DP + 22);
     }
 
     private void startAlarmMonitorService() {
@@ -2715,7 +2715,7 @@ public class MainActivity extends Activity {
             LinearLayout tip = new LinearLayout(this);
             tip.setOrientation(LinearLayout.HORIZONTAL);
             tip.setGravity(Gravity.CENTER_VERTICAL);
-            tip.setPadding(dp(12), dp(10), dp(12), dp(10));
+            tip.setPadding(dp(12), dp(9), dp(12), dp(9));
             tip.setBackground(roundedStroke(SURFACE, 14, 0xffe0e7f0));
             TextView dot = new TextView(this);
             dot.setText("●");
@@ -2728,12 +2728,6 @@ public class MainActivity extends Activity {
             text.setTextColor(INK);
             tip.addView(text, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
             panel.addView(tip);
-            if (!gatewayManagementMode && !offlineMouldMode) {
-                Button addMould = smallButton("+ 添加模具");
-                styleButton(addMould, BLUE, 0xffffffff, BLUE);
-                addMould.setOnClickListener(v -> showAddMouldWithSensorsDialog());
-                panel.addView(addMould, fixedTop(ViewGroup.LayoutParams.MATCH_PARENT, dp(44), dp(10)));
-            }
         }
         page.addView(panel);
     }
@@ -2769,6 +2763,20 @@ public class MainActivity extends Activity {
         fixedMouldGatewayCountView.setGravity(Gravity.CENTER_VERTICAL | Gravity.RIGHT);
         fixedMouldGatewayCountView.setSingleLine(true);
         row.addView(fixedMouldGatewayCountView);
+        if (!gatewayManagementMode && !offlineMouldMode) {
+            TextView addMould = new TextView(this);
+            addMould.setText("+");
+            addMould.setTextSize(22);
+            addMould.setTypeface(null, 1);
+            addMould.setTextColor(0xffffffff);
+            addMould.setGravity(Gravity.CENTER);
+            addMould.setIncludeFontPadding(false);
+            addMould.setBackground(gradient(BLUE, CYAN, 16));
+            addMould.setOnClickListener(v -> showAddMouldWithSensorsDialog());
+            LinearLayout.LayoutParams addParams = new LinearLayout.LayoutParams(dp(32), dp(32));
+            addParams.leftMargin = dp(10);
+            row.addView(addMould, addParams);
+        }
         page.addView(row);
     }
 
@@ -6721,11 +6729,6 @@ public class MainActivity extends Activity {
         form.addView(label("注意：模具需要绑定才能通过网关发出声光报警！"));
         form.addView(mould, fixedTop(ViewGroup.LayoutParams.MATCH_PARENT, dp(44), dp(6)));
 
-        EditText number = input("网关编号", false);
-        number.setText(gateway.optString("number"));
-        form.addView(label("网关编号"));
-        form.addView(number, fixedTop(ViewGroup.LayoutParams.MATCH_PARENT, dp(44), dp(6)));
-
         EditText name = input("名称", false);
         name.setText(gateway.optString("name"));
         form.addView(label("名称"));
@@ -6754,7 +6757,7 @@ public class MainActivity extends Activity {
                 .setTitle("网关信息修改")
                 .setView(scroll)
                 .setNegativeButton("取消", null)
-                .setPositiveButton("保存", (d, which) -> saveGatewayInfo(gateway, dept, mould, number, name, longitude, latitude, pointState, remark))
+                .setPositiveButton("保存", (d, which) -> saveGatewayInfo(gateway, dept, mould, name, longitude, latitude, pointState, remark))
                 .create();
         dialog.setOnShowListener(d -> {
             if (dialog.getWindow() != null) {
@@ -6766,11 +6769,10 @@ public class MainActivity extends Activity {
         showStyledDialog(dialog);
     }
 
-    private void saveGatewayInfo(JSONObject gateway, Spinner dept, Spinner mould, EditText number, EditText name, EditText longitude, EditText latitude, Spinner pointState, EditText remark) {
+    private void saveGatewayInfo(JSONObject gateway, Spinner dept, Spinner mould, EditText name, EditText longitude, EditText latitude, Spinner pointState, EditText remark) {
         setLoading(true);
         try {
             JSONObject body = new JSONObject(gateway.toString());
-            body.put("number", number.getText().toString().trim());
             body.put("name", name.getText().toString().trim());
             body.put("remark", remark.getText().toString().trim());
             putSelected(body, "deptId", dept);
