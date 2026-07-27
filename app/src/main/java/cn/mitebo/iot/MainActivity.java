@@ -224,6 +224,7 @@ public class MainActivity extends Activity {
     private final Map<String, Boolean> alarmMouldStateLockedOffline = new HashMap<>();
     private final Set<String> activeAlarmMouldIds = new HashSet<>();
     private final Set<String> offlineAlarmMouldIds = new HashSet<>();
+    private final Set<String> restoringLowerLimitKeys = new HashSet<>();
     private boolean offlineAlarmMouldIdsRestored = false;
     private final Map<String, TextView> visiblePressureViews = new HashMap<>();
     private final Map<String, TextView> visibleStandardViews = new HashMap<>();
@@ -603,7 +604,7 @@ public class MainActivity extends Activity {
         panel.addView(tip, topMargin(dp(14)));
 
         TextView version = new TextView(this);
-        version.setText("作者 kunkun  版本号 1.0.84");
+        version.setText("作者 kunkun  版本号 1.0.85");
         version.setTextSize(13);
         version.setTextColor(0xffb7c9d9);
         version.setGravity(Gravity.CENTER);
@@ -3962,6 +3963,7 @@ public class MainActivity extends Activity {
                         if (device == null) {
                             continue;
                         }
+                        restoreLowerLimitIfPressureReturned(device);
                         String mouldId = device.optString("mouldId");
                         if (mouldId.length() == 0) {
                             JSONObject mould = device.optJSONObject("mould");
@@ -4542,6 +4544,7 @@ public class MainActivity extends Activity {
     }
 
     private View deviceDisplayCard(JSONObject item) {
+        restoreLowerLimitIfPressureReturned(item);
         LinearLayout card = new LinearLayout(this);
         card.setOrientation(LinearLayout.HORIZONTAL);
         card.setGravity(Gravity.CENTER_VERTICAL);
@@ -4862,9 +4865,20 @@ public class MainActivity extends Activity {
             container.addView(info, topMargin(dp(6)));
         }
 
+        LinearLayout actions = new LinearLayout(this);
+        actions.setOrientation(LinearLayout.HORIZONTAL);
+        actions.setGravity(Gravity.CENTER);
         TextView limit = compactAction("上下限修改");
         limit.setOnClickListener(v -> showAlarmLimitDialog(item));
-        container.addView(limit, fixedTop(ViewGroup.LayoutParams.MATCH_PARENT, dp(32), dp(6)));
+        LinearLayout.LayoutParams limitParams = new LinearLayout.LayoutParams(0, dp(32), 1);
+        limitParams.rightMargin = dp(5);
+        actions.addView(limit, limitParams);
+        TextView muteZero = compactAction("屏蔽无气压告警");
+        muteZero.setOnClickListener(v -> muteZeroPressureAlarmSensors(item));
+        LinearLayout.LayoutParams muteParams = new LinearLayout.LayoutParams(0, dp(32), 1);
+        muteParams.leftMargin = dp(5);
+        actions.addView(muteZero, muteParams);
+        container.addView(actions, topMargin(dp(6)));
     }
 
     private View swipeDeleteAlarmRow(JSONObject item, View card) {
@@ -6041,6 +6055,11 @@ public class MainActivity extends Activity {
         return pressure != null && Math.abs(pressure) < 0.0001d;
     }
 
+    private String storagePressureValue(String value) {
+        Double pressure = pressureToBar(value);
+        return pressure == null ? "" : trimNumber(pressure);
+    }
+
     private String lowerLimitBackupKey(JSONObject device) {
         String key = pressureStateKey(device);
         return key.length() == 0 ? "" : PREF_LOWER_LIMIT_BACKUP_PREFIX + key;
@@ -6069,6 +6088,82 @@ public class MainActivity extends Activity {
         String key = lowerLimitBackupKey(device);
         if (key.length() > 0) {
             getSharedPreferences(PREFS, MODE_PRIVATE).edit().remove(key).apply();
+        }
+    }
+
+    private String storedLowerLimitBackupStorage(JSONObject device) {
+        String key = lowerLimitBackupKey(device);
+        if (key.length() == 0) {
+            return "";
+        }
+        return getSharedPreferences(PREFS, MODE_PRIVATE).getString(key, "");
+    }
+
+    private void saveLowerLimitBackupStorage(JSONObject device, String storageValue) {
+        String key = lowerLimitBackupKey(device);
+        if (key.length() == 0 || storageValue == null || storageValue.trim().length() == 0) {
+            return;
+        }
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                .putString(key, storageValue.trim())
+                .apply();
+    }
+
+    private boolean hasPositiveRealtimePressure(JSONObject device) {
+        Double pressure = device == null ? null : pressureToBar(device.optString("pressure"));
+        return pressure != null && pressure > 0.005d;
+    }
+
+    private boolean hasMutedLowerLimit(JSONObject device) {
+        return isZeroPressureInput(device == null ? "" : device.optString("lower"))
+                && storedLowerLimitBackupStorage(device).length() > 0;
+    }
+
+    private void restoreLowerLimitIfPressureReturned(JSONObject device) {
+        if (device == null || !hasMutedLowerLimit(device) || !hasPositiveRealtimePressure(device)) {
+            return;
+        }
+        String key = lowerLimitBackupKey(device);
+        if (key.length() == 0 || restoringLowerLimitKeys.contains(key)) {
+            return;
+        }
+        String backup = storedLowerLimitBackupStorage(device);
+        if (backup.length() == 0 || isZeroPressureInput(backup)) {
+            clearLowerLimitBackup(device);
+            return;
+        }
+        restoringLowerLimitKeys.add(key);
+        putDeviceLowerLimit(device, backup, result -> {
+            restoringLowerLimitKeys.remove(key);
+            if (result.ok && apiBusinessOk(result)) {
+                clearLowerLimitBackup(device);
+                refreshVisibleMouldPressureValues();
+            }
+        });
+    }
+
+    private void putDeviceLowerLimit(JSONObject device, String lowerStorageValue, ApiCallback callback) {
+        try {
+            JSONObject body = new JSONObject(device.toString());
+            body.put("lower", lowerStorageValue == null ? "" : lowerStorageValue.trim());
+            new ApiTask("PUT", "/yujing/device", body.toString(), true, callback).execute();
+        } catch (Exception e) {
+            ApiResult result = new ApiResult();
+            result.ok = false;
+            result.message = "保存内容创建失败";
+            callback.done(result);
+        }
+    }
+
+    private boolean apiBusinessOk(ApiResult result) {
+        if (result == null || !result.ok) {
+            return false;
+        }
+        try {
+            JSONObject json = new JSONObject(result.body);
+            return json.optInt("code", 200) == 200;
+        } catch (Exception ignored) {
+            return true;
         }
     }
 
@@ -6172,6 +6267,7 @@ public class MainActivity extends Activity {
                     if (device == null) {
                         continue;
                     }
+                    restoreLowerLimitIfPressureReturned(device);
                     String mouldId = device.optString("mouldId");
                     if (mouldId.length() == 0) {
                         JSONObject mould = device.optJSONObject("mould");
@@ -6335,6 +6431,83 @@ public class MainActivity extends Activity {
                 showAlarmLimitSelector(alarm, sensors);
             }
         }).execute();
+    }
+
+    private void muteZeroPressureAlarmSensors(JSONObject alarm) {
+        String mouldId = alarmMouldId(alarm);
+        if (mouldId.length() == 0) {
+            toast("未找到告警模具，无法批量屏蔽");
+            return;
+        }
+        setLoading(true);
+        String endpoint = "/yujing/device/list?pageNum=1&pageSize=1000&mouldId=" + mouldId;
+        new ApiTask("GET", endpoint, null, true, result -> {
+            if (!result.ok) {
+                setLoading(false);
+                toast(result.message);
+                return;
+            }
+            try {
+                JSONObject json = new JSONObject(result.body);
+                JSONArray rows = json.optJSONArray("rows");
+                List<JSONObject> zeroPressureDevices = zeroPressureDevicesWithLowerLimit(rows);
+                if (zeroPressureDevices.isEmpty()) {
+                    setLoading(false);
+                    toast("未找到需要屏蔽的0气压传感器");
+                    return;
+                }
+                muteZeroPressureDevices(zeroPressureDevices);
+            } catch (Exception e) {
+                setLoading(false);
+                toast("读取模具传感器失败");
+            }
+        }).execute();
+    }
+
+    private List<JSONObject> zeroPressureDevicesWithLowerLimit(JSONArray rows) {
+        List<JSONObject> devices = new ArrayList<>();
+        if (rows == null) {
+            return devices;
+        }
+        for (int i = 0; i < rows.length(); i++) {
+            JSONObject device = rows.optJSONObject(i);
+            if (device == null || !isZeroRealtimePressure(device)) {
+                continue;
+            }
+            String lower = storagePressureValue(device.optString("lower"));
+            if (lower.length() == 0 || isZeroPressureInput(lower)) {
+                continue;
+            }
+            devices.add(device);
+        }
+        return devices;
+    }
+
+    private void muteZeroPressureDevices(List<JSONObject> devices) {
+        final int total = devices.size();
+        final int[] remaining = {total};
+        final int[] success = {0};
+        for (JSONObject device : devices) {
+            String originalLower = storagePressureValue(device.optString("lower"));
+            if (originalLower.length() > 0 && !isZeroPressureInput(originalLower)) {
+                saveLowerLimitBackupStorage(device, originalLower);
+            }
+            putDeviceLowerLimit(device, "0", result -> {
+                if (result.ok && apiBusinessOk(result)) {
+                    success[0]++;
+                }
+                remaining[0]--;
+                if (remaining[0] <= 0) {
+                    setLoading(false);
+                    if (success[0] == total) {
+                        toast("已屏蔽" + success[0] + "个0气压传感器告警");
+                    } else {
+                        toast("已屏蔽" + success[0] + "/" + total + "个0气压传感器告警");
+                    }
+                    loadList(false);
+                }
+            });
+        }
     }
 
     private List<JSONObject> alarmSensors(JSONObject alarm) {
@@ -6939,6 +7112,9 @@ public class MainActivity extends Activity {
                 if (!result.ok) {
                     toast(result.message);
                     return;
+                }
+                if (!isZeroPressureInput(lower)) {
+                    clearLowerLimitBackup(device);
                 }
                 toast("上下限已保存");
                 loadList(false);
