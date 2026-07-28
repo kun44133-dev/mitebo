@@ -137,6 +137,9 @@ public class MainActivity extends Activity {
     private static final double STATIC_PRESSURE_DELTA = 10.0;
     private static final double STATIC_PRESSURE_STABLE_DELTA = 2.0;
     private static final double STATIC_PRESSURE_OVERWRITE_DELTA = 2.0;
+    private static final String DEFAULT_SENSOR_LOWER_BAR = "100";
+    private static final String DEFAULT_SENSOR_UPPER_BAR = "320";
+    private static final String DEFAULT_SENSOR_STANDARD_BAR = "150";
 
     private FrameLayout root;
     private ProgressBar loading;
@@ -604,7 +607,7 @@ public class MainActivity extends Activity {
         panel.addView(tip, topMargin(dp(14)));
 
         TextView version = new TextView(this);
-        version.setText("作者 kunkun  版本号 1.0.85");
+        version.setText("作者 kunkun  版本号 1.0.86");
         version.setTextSize(13);
         version.setTextColor(0xffb7c9d9);
         version.setGravity(Gravity.CENTER);
@@ -7136,8 +7139,6 @@ public class MainActivity extends Activity {
         name.setText(mould.optString("name"));
         EditText customer = input("客户", false);
         customer.setText(mould.optString("customer"));
-        EditText remark = input("备注", false);
-        remark.setText(mould.optString("remark"));
 
         form.addView(label("模具编号"));
         form.addView(number, fixedTop(ViewGroup.LayoutParams.MATCH_PARENT, dp(44), dp(2)));
@@ -7145,8 +7146,6 @@ public class MainActivity extends Activity {
         form.addView(name, fixedTop(ViewGroup.LayoutParams.MATCH_PARENT, dp(44), dp(4)));
         form.addView(label("客户"));
         form.addView(customer, fixedTop(ViewGroup.LayoutParams.MATCH_PARENT, dp(44), dp(4)));
-        form.addView(label("备注"));
-        form.addView(remark, fixedTop(ViewGroup.LayoutParams.MATCH_PARENT, dp(44), dp(4)));
 
         AlertDialog dialog = new AlertDialog.Builder(this)
                 .setTitle(primaryTitle(mould) + " - 修改信息")
@@ -7156,21 +7155,19 @@ public class MainActivity extends Activity {
                         mould,
                         number.getText().toString().trim(),
                         name.getText().toString().trim(),
-                        customer.getText().toString().trim(),
-                        remark.getText().toString().trim()
+                        customer.getText().toString().trim()
                 ))
                 .create();
         showStyledDialog(dialog);
     }
 
-    private void saveMouldInfo(JSONObject mould, String number, String name, String customer, String remark) {
+    private void saveMouldInfo(JSONObject mould, String number, String name, String customer) {
         setLoading(true);
         try {
             JSONObject body = new JSONObject(mould.toString());
             body.put("number", number);
             body.put("name", name);
             body.put("customer", customer);
-            body.put("remark", remark);
             new ApiTask("PUT", "/yujing/mould", body.toString(), true, result -> {
                 setLoading(false);
                 if (!result.ok) {
@@ -7261,7 +7258,6 @@ public class MainActivity extends Activity {
         EditText number = input("模具编号", false);
         EditText name = input("模具名称", false);
         EditText customer = input("客户", false);
-        EditText remark = input("备注", false);
 
         form.addView(label("模具信息"));
         form.addView(label("组织"));
@@ -7272,8 +7268,6 @@ public class MainActivity extends Activity {
         form.addView(name, fixedTop(ViewGroup.LayoutParams.MATCH_PARENT, dp(44), dp(4)));
         form.addView(label("客户"));
         form.addView(customer, fixedTop(ViewGroup.LayoutParams.MATCH_PARENT, dp(44), dp(4)));
-        form.addView(label("备注"));
-        form.addView(remark, fixedTop(ViewGroup.LayoutParams.MATCH_PARENT, dp(44), dp(4)));
 
         TextView sensorTitle = label("绑定传感器");
         sensorTitle.setPadding(0, dp(14), 0, 0);
@@ -7331,7 +7325,7 @@ public class MainActivity extends Activity {
                             mouldNumber,
                             mouldName,
                             customer.getText().toString().trim(),
-                            remark.getText().toString().trim(),
+                            "",
                             drafts
                     );
                 });
@@ -7409,9 +7403,9 @@ public class MainActivity extends Activity {
         EditText name = input("传感器名称", false);
         name.setText(firstValue(sensor, "name", "deviceName"));
         EditText lower = input("报警下限", false);
-        lower.setText(pressureInputValue(sensor.optString("lower")));
+        lower.setText(pressureInputValue(DEFAULT_SENSOR_LOWER_BAR));
         EditText upper = input("报警上限", false);
-        upper.setText(pressureInputValue(sensor.optString("upper")));
+        upper.setText(pressureInputValue(DEFAULT_SENSOR_UPPER_BAR));
 
         form.addView(sensorMeta);
         form.addView(label("传感器名称"));
@@ -7520,6 +7514,7 @@ public class MainActivity extends Activity {
                             JSONObject device = new JSONObject(draft.sensor.toString());
                             device.put("mouldId", mouldId);
                             device.put("name", draft.name);
+                            device.put("standard", DEFAULT_SENSOR_STANDARD_BAR);
                             String lower = pressureInputToStorageValue(draft.lower);
                             String upper = pressureInputToStorageValue(draft.upper);
                             if (lower.length() > 0) {
