@@ -607,7 +607,7 @@ public class MainActivity extends Activity {
         panel.addView(tip, topMargin(dp(14)));
 
         TextView version = new TextView(this);
-        version.setText("作者 kunkun  版本号 1.0.86");
+        version.setText("作者 kunkun  版本号 1.0.87");
         version.setTextSize(13);
         version.setTextColor(0xffb7c9d9);
         version.setGravity(Gravity.CENTER);
@@ -866,7 +866,7 @@ public class MainActivity extends Activity {
         LinearLayout page = new LinearLayout(this);
         page.setOrientation(LinearLayout.VERTICAL);
         page.setBackgroundColor(PAGE_BG);
-        page.setPadding(0, dp(32), 0, dp(20));
+        page.setPadding(0, currentTab == 2 ? dp(17) : dp(32), 0, dp(20));
         applyHomeInsets(page);
 
         addContextPanel(page);
@@ -953,7 +953,7 @@ public class MainActivity extends Activity {
             int topInset = getTopSystemInset(insets);
             int bottomInset = getBottomSystemInset(insets);
             lastBottomSystemInset = bottomInset;
-            view.setPadding(0, topInset + dp(22), 0, bottomInset + dp(10));
+            view.setPadding(0, topInset + (currentTab == 2 ? dp(7) : dp(22)), 0, bottomInset + dp(10));
             updateFloatingMouldControlsPosition();
             return insets;
         });
@@ -7400,8 +7400,7 @@ public class MainActivity extends Activity {
         form.setPadding(dp(14), dp(6), dp(14), dp(8));
 
         TextView sensorMeta = meta("MAC：" + firstNonEmpty(firstValue(sensor, "number", "deviceNumber", "mac", "macAddress"), primaryTitle(sensor)));
-        EditText name = input("传感器名称", false);
-        name.setText(firstValue(sensor, "name", "deviceName"));
+        EditText name = input("输入模具气路名称", false);
         EditText lower = input("报警下限", false);
         lower.setText(pressureInputValue(DEFAULT_SENSOR_LOWER_BAR));
         EditText upper = input("报警上限", false);
@@ -7422,7 +7421,7 @@ public class MainActivity extends Activity {
                 .setPositiveButton("添加", (d, which) -> {
                     String sensorName = name.getText().toString().trim();
                     if (sensorName.length() == 0) {
-                        toast("请输入传感器名称");
+                        toast("请输入模具气路名称");
                         return;
                     }
                     drafts.add(new AddMouldSensorDraft(
