@@ -607,7 +607,7 @@ public class MainActivity extends Activity {
         panel.addView(tip, topMargin(dp(14)));
 
         TextView version = new TextView(this);
-        version.setText("作者 kunkun  版本号 1.0.88");
+        version.setText("作者 kunkun  版本号 1.0.89");
         version.setTextSize(13);
         version.setTextColor(0xffb7c9d9);
         version.setGravity(Gravity.CENTER);
@@ -3844,7 +3844,7 @@ public class MainActivity extends Activity {
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setGravity(Gravity.CENTER_VERTICAL);
         row.setPadding(fixed ? dp(14) : dp(2),
-                fixed || currentTab == 1 || currentTab == 2 ? dp(6) : dp(14),
+                fixed || currentTab == 1 || currentTab == 2 ? dp(6) : currentTab == 0 ? dp(9) : dp(14),
                 fixed ? dp(14) : dp(2),
                 dp(2));
 
@@ -7355,6 +7355,21 @@ public class MainActivity extends Activity {
             visibleCount++;
             TextView row = sensorPickRow(sensor);
             row.setOnClickListener(v -> {
+                if (isSensorBoundToMould(sensor)) {
+                    AlertDialog confirm = new AlertDialog.Builder(this)
+                            .setTitle("传感器已绑定")
+                            .setMessage("确定换绑到其他模具？")
+                            .setNegativeButton("取消", null)
+                            .setPositiveButton("确定", (dialog, which) -> {
+                                if (picker[0] != null) {
+                                    picker[0].dismiss();
+                                }
+                                showAddMouldSensorEditor(sensor, drafts, selectedSensors);
+                            })
+                            .create();
+                    showStyledDialog(confirm);
+                    return;
+                }
                 if (picker[0] != null) {
                     picker[0].dismiss();
                 }
@@ -7384,18 +7399,36 @@ public class MainActivity extends Activity {
         TextView row = new TextView(this);
         String mac = firstNonEmpty(firstValue(sensor, "number", "deviceNumber", "mac", "macAddress"), primaryTitle(sensor));
         String name = firstNonEmpty(firstValue(sensor, "name", "deviceName"), "未命名传感器");
-        String mouldName = "";
-        JSONObject mould = sensor.optJSONObject("mould");
-        if (mould != null) {
-            mouldName = mouldOptionLabel(mould);
-        }
+        String mouldName = boundMouldLabel(sensor);
+        boolean bound = mouldName.length() > 0;
         row.setText("MAC：" + mac + "\n" + name + (mouldName.length() > 0 ? " · 已绑定：" + mouldName : " · 未绑定"));
         row.setTextSize(13);
         row.setTextColor(INK);
         row.setGravity(Gravity.CENTER_VERTICAL);
         row.setPadding(dp(12), dp(8), dp(12), dp(8));
-        row.setBackground(roundedStroke(0xfffbfdff, 14, 0xffd8e4f1));
+        row.setBackground(roundedStroke(bound ? 0xfffffbeb : 0xffecfdf5, 14, bound ? 0xfffde68a : 0xffbbf7d0));
         return row;
+    }
+
+    private boolean isSensorBoundToMould(JSONObject sensor) {
+        return boundMouldLabel(sensor).length() > 0;
+    }
+
+    private String boundMouldLabel(JSONObject sensor) {
+        if (sensor == null) {
+            return "";
+        }
+        JSONObject mould = sensor.optJSONObject("mould");
+        if (mould != null) {
+            String label = mouldOptionLabel(mould);
+            if (label.length() > 0 && !"未命名模具".equals(label)) {
+                return label;
+            }
+        }
+        return firstNonEmpty(
+                firstValue(sensor, "mouldName", "mould_name", "mouldNumber", "mould_number"),
+                valueOf(sensor, "mouldId")
+        );
     }
 
     private void showAddMouldSensorEditor(JSONObject sensor, List<AddMouldSensorDraft> drafts, LinearLayout selectedSensors) {

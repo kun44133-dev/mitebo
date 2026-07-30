@@ -4,6 +4,28 @@
 
 ## 2026-07-30
 
+### 打包版本 1.0.89
+
+- `versionCode` 更新为 `89`，`versionName` 和登录页版本号更新为 `1.0.89`。
+- 本次安装包包含添加模具传感器选择提示优化、已绑定传感器换绑确认，以及设备管理列表标题间距优化。
+
+### 设备管理列表标题间距优化
+
+- 设备管理页面按钮区与设备列表标题之间的纵向距离减少 `5dp`，让列表区域更紧凑。
+- 影响文件：`app/src/main/java/cn/mitebo/iot/MainActivity.java`。
+
+### 添加模具传感器选择提示优化
+
+- 添加模具流程的传感器选择列表中，已绑定传感器显示浅黄色背景，未绑定传感器显示浅绿色背景，便于操作员快速区分。
+- 点击已绑定传感器时新增“确定换绑到其他模具？”确认弹窗，确认后再进入传感器绑定设置，减少误换绑。
+- 影响文件：`app/src/main/java/cn/mitebo/iot/MainActivity.java`。
+
+### 下载宣传图二维码更新
+
+- 新增 `v1.0.88` 版 App 下载宣传图文件，二维码指向最新版 APK 下载地址。
+- 同步生成本地二维码 PNG，供 HTML 宣传页引用；SVG 宣传图内嵌二维码，方便单文件查看。
+- 影响文件：`docs/mitebo-download-qr-v1.0.88.png`、`docs/mitebo-install-poster-v1.0.88.svg`、`docs/mitebo-simple-install-poster-v1.0.88.html`。
+
 ### 打包版本 1.0.88
 
 - `versionCode` 更新为 `88`，`versionName` 和登录页版本号更新为 `1.0.88`。

@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <style>
+    * { box-sizing: border-box; }
+    html, body {
+      width: 1080px;
+      height: 1920px;
+      margin: 0;
+      overflow: hidden;
+      font-family: "PingFang SC", "Microsoft YaHei", Arial, sans-serif;
+      background: #eaf2f9;
+    }
+    .poster {
+      position: relative;
+      width: 1080px;
+      height: 1920px;
+      padding: 74px 62px 58px;
+      background:
+        radial-gradient(circle at 86% 10%, rgba(31,124,255,.26) 0, transparent 310px),
+        linear-gradient(180deg, #eef6fd 0%, #e9f1f8 100%);
+      color: #071827;
+    }
+    .title {
+      font-size: 66px;
+      line-height: 1.05;
+      font-weight: 900;
+      letter-spacing: 0;
+      margin: 0;
+    }
+    .subtitle {
+      margin-top: 20px;
+      font-size: 31px;
+      color: #536477;
+      font-weight: 600;
+    }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 14px;
+      height: 56px;
+      padding: 0 28px;
+      margin-top: 30px;
+      border-radius: 999px;
+      color: white;
+      font-size: 26px;
+      font-weight: 800;
+      background: linear-gradient(90deg, #1f7cff, #13bcd3);
+      box-shadow: 0 12px 28px rgba(31, 124, 255, .22);
+    }
+    .badge::before {
+      content: "";
+      width: 13px;
+      height: 13px;
+      border-radius: 50%;
+      background: #2dffc0;
+    }
+    .main {
+      position: absolute;
+      left: 58px;
+      right: 58px;
+      top: 310px;
+      bottom: 280px;
+      display: flex;
+      align-items: center;
+      gap: 48px;
+    }
+    .phone {
+      position: relative;
+      width: 478px;
+      height: 1038px;
+      border-radius: 64px;
+      padding: 16px;
+      background: #101827;
+      box-shadow: 0 24px 58px rgba(13, 44, 82, .24);
+      flex: none;
+    }
+    .phone-screen {
+      width: 100%;
+      height: 100%;
+      border-radius: 52px;
+      overflow: hidden;
+      background: #edf5fb;
+    }
+    .phone-screen img {
+      display: block;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      object-position: center top;
+    }
+    .panel {
+      flex: 1;
+      min-width: 0;
+    }
+    .qr-card {
+      width: 390px;
+      padding: 30px 30px 26px;
+      border-radius: 42px;
+      background: #ffffff;
+      box-shadow: 0 18px 42px rgba(13, 44, 82, .14);
+      text-align: center;
+    }
+    .qr-card img {
+      width: 300px;
+      height: 300px;
+      image-rendering: pixelated;
+    }
+    .qr-title {
+      margin-top: 18px;
+      font-size: 35px;
+      line-height: 1.1;
+      font-weight: 900;
+      color: #071827;
+    }
+    .qr-sub {
+      margin-top: 14px;
+      font-size: 24px;
+      color: #6b7c90;
+      font-weight: 600;
+    }
+    .features {
+      margin-top: 46px;
+      display: grid;
+      gap: 18px;
+    }
+    .feature {
+      height: 72px;
+      display: flex;
+      align-items: center;
+      gap: 18px;
+      padding: 0 24px;
+      border-radius: 22px;
+      background: rgba(255,255,255,.72);
+      border: 1px solid rgba(191, 212, 229, .9);
+      color: #1f3145;
+      font-size: 25px;
+      font-weight: 800;
+    }
+    .dot {
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: #12bf7f;
+      flex: none;
+    }
+    .dot.yellow { background: #ffc947; }
+    .dot.blue { background: #1f7cff; }
+    .bottom {
+      position: absolute;
+      left: 74px;
+      right: 74px;
+      bottom: 74px;
+      height: 150px;
+      border-radius: 38px;
+      padding: 34px 44px;
+      background: #ffffff;
+      box-shadow: 0 18px 42px rgba(13, 44, 82, .12);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .app-name {
+      font-size: 42px;
+      font-weight: 900;
+      line-height: 1.1;
+    }
+    .hint {
+      margin-top: 12px;
+      font-size: 25px;
+      color: #607086;
+      font-weight: 600;
+    }
+    .install {
+      width: 210px;
+      height: 62px;
+      border-radius: 31px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #ffffff;
+      font-size: 27px;
+      font-weight: 900;
+      background: linear-gradient(90deg, #1f7cff, #13bcd3);
+    }
+  </style>
+</head>
+<body>
+  <div class="poster">
+    <h1 class="title">密特堡压力监测</h1>
+    <div class="subtitle">氮气弹簧实时压力、设备状态、告警联动</div>
+    <div class="badge">安卓安装版 v1.0.88</div>
+
+    <div class="main">
+      <div class="phone">
+        <div class="phone-screen">
+          <img src="file:///var/folders/cd/wr0d08cn7jl7nmpp528hm7800000gn/T/codex-clipboard-c356df15-4111-4d65-8667-533b1af635a5.jpg" alt="App界面">
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="qr-card">
+          <img src="file:///Users/kun/Documents/Codex/2026-05-17/iot-mitebo-cn/docs/mitebo-download-qr-v1.0.88.png" alt="下载二维码">
+          <div class="qr-title">扫码下载安装</div>
+          <div class="qr-sub">国内镜像加速下载</div>
+        </div>
+        <div class="features">
+          <div class="feature"><span class="dot"></span>模具在线/离线监控</div>
+          <div class="feature"><span class="dot yellow"></span>告警铃声与语音播报</div>
+          <div class="feature"><span class="dot blue"></span>设备、网关统一管理</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="bottom">
+      <div>
+        <div class="app-name">密特堡压力监测 App</div>
+        <div class="hint">适用于安卓手机，扫码下载最新版安装包</div>
+      </div>
+      <div class="install">安装版</div>
+    </div>
+  </div>
+</body>
+</html>
