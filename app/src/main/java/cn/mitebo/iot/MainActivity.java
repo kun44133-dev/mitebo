@@ -607,7 +607,7 @@ public class MainActivity extends Activity {
         panel.addView(tip, topMargin(dp(14)));
 
         TextView version = new TextView(this);
-        version.setText("作者 kunkun  版本号 1.0.89");
+        version.setText("作者 kunkun  版本号 1.0.90");
         version.setTextSize(13);
         version.setTextColor(0xffb7c9d9);
         version.setGravity(Gravity.CENTER);
@@ -7339,17 +7339,68 @@ public class MainActivity extends Activity {
     }
 
     private void showAddMouldSensorPickerDialog(List<JSONObject> sensors, List<AddMouldSensorDraft> drafts, LinearLayout selectedSensors) {
-        LinearLayout list = new LinearLayout(this);
-        list.setOrientation(LinearLayout.VERTICAL);
-        list.setPadding(dp(12), dp(8), dp(12), dp(10));
+        LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setPadding(dp(12), dp(8), dp(12), dp(10));
         TextView tip = meta("从系统传感器列表选择，一个传感器保存一条绑定信息");
-        list.addView(tip);
+        panel.addView(tip);
+
+        TextView stats = meta(addMouldSensorPickerStats(sensors));
+        panel.addView(stats, topMargin(dp(6)));
 
         final AlertDialog[] picker = new AlertDialog[1];
+        final boolean[] unboundOnly = {false};
+        LinearLayout rows = new LinearLayout(this);
+        rows.setOrientation(LinearLayout.VERTICAL);
+
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(rows, new ScrollView.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+        panel.addView(scroll, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+
+        Button unboundOnlyButton = smallButton("未绑定");
+        styleButton(unboundOnlyButton, 0xffecfdf5, 0xff059669, 0xffbbf7d0);
+        panel.addView(unboundOnlyButton, fixedTop(ViewGroup.LayoutParams.MATCH_PARENT, dp(40), dp(10)));
+
+        Runnable renderRows = () -> {
+            renderAddMouldSensorPickerRows(rows, sensors, drafts, selectedSensors, picker, unboundOnly[0]);
+            unboundOnlyButton.setText(unboundOnly[0] ? "显示全部" : "未绑定");
+            styleButton(unboundOnlyButton, unboundOnly[0] ? 0xfffffbeb : 0xffecfdf5,
+                    unboundOnly[0] ? 0xffb45309 : 0xff059669,
+                    unboundOnly[0] ? 0xfffde68a : 0xffbbf7d0);
+        };
+        unboundOnlyButton.setOnClickListener(v -> {
+            unboundOnly[0] = !unboundOnly[0];
+            renderRows.run();
+        });
+        renderRows.run();
+
+        picker[0] = new AlertDialog.Builder(this)
+                .setTitle("选择传感器")
+                .setView(panel)
+                .setNegativeButton("关闭", null)
+                .create();
+        showStyledDialog(picker[0]);
+    }
+
+    private void renderAddMouldSensorPickerRows(LinearLayout rows, List<JSONObject> sensors,
+                                                List<AddMouldSensorDraft> drafts,
+                                                LinearLayout selectedSensors,
+                                                AlertDialog[] picker,
+                                                boolean unboundOnly) {
+        rows.removeAllViews();
         int visibleCount = 0;
         for (int i = 0; i < sensors.size(); i++) {
             JSONObject sensor = sensors.get(i);
             if (isSensorAlreadySelected(sensor, drafts)) {
+                continue;
+            }
+            if (unboundOnly && isSensorBoundToMould(sensor)) {
                 continue;
             }
             visibleCount++;
@@ -7375,24 +7426,24 @@ public class MainActivity extends Activity {
                 }
                 showAddMouldSensorEditor(sensor, drafts, selectedSensors);
             });
-            list.addView(row, topMargin(dp(8)));
+            rows.addView(row, topMargin(dp(8)));
         }
         if (visibleCount == 0) {
-            list.addView(meta("可选传感器已全部添加"), topMargin(dp(10)));
+            rows.addView(meta(unboundOnly ? "暂无未绑定传感器" : "可选传感器已全部添加"), topMargin(dp(10)));
         }
+    }
 
-        ScrollView scroll = new ScrollView(this);
-        scroll.addView(list, new ScrollView.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-        ));
-
-        picker[0] = new AlertDialog.Builder(this)
-                .setTitle("选择传感器")
-                .setView(scroll)
-                .setNegativeButton("关闭", null)
-                .create();
-        showStyledDialog(picker[0]);
+    private String addMouldSensorPickerStats(List<JSONObject> sensors) {
+        int total = sensors == null ? 0 : sensors.size();
+        int unbound = 0;
+        if (sensors != null) {
+            for (int i = 0; i < sensors.size(); i++) {
+                if (!isSensorBoundToMould(sensors.get(i))) {
+                    unbound++;
+                }
+            }
+        }
+        return "传感器总数：" + total + "  未绑定：" + unbound;
     }
 
     private TextView sensorPickRow(JSONObject sensor) {
