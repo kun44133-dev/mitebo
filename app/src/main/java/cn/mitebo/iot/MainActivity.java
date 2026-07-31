@@ -607,7 +607,7 @@ public class MainActivity extends Activity {
         panel.addView(tip, topMargin(dp(14)));
 
         TextView version = new TextView(this);
-        version.setText("作者 kunkun  版本号 1.0.90");
+        version.setText("作者 kunkun  版本号 1.0.91");
         version.setTextSize(13);
         version.setTextColor(0xffb7c9d9);
         version.setGravity(Gravity.CENTER);
@@ -7358,9 +7358,10 @@ public class MainActivity extends Activity {
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
         ));
+        int sensorListHeight = Math.min(dp(420), (int) (getResources().getDisplayMetrics().heightPixels * 0.46f));
         panel.addView(scroll, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
+                sensorListHeight
         ));
 
         Button unboundOnlyButton = smallButton("未绑定");
