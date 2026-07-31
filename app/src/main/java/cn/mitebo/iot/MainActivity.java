@@ -607,7 +607,7 @@ public class MainActivity extends Activity {
         panel.addView(tip, topMargin(dp(14)));
 
         TextView version = new TextView(this);
-        version.setText("作者 kunkun  版本号 1.0.91");
+        version.setText("作者 kunkun  版本号 1.0.92");
         version.setTextSize(13);
         version.setTextColor(0xffb7c9d9);
         version.setGravity(Gravity.CENTER);
@@ -7364,9 +7364,21 @@ public class MainActivity extends Activity {
                 sensorListHeight
         ));
 
+        LinearLayout actions = new LinearLayout(this);
+        actions.setOrientation(LinearLayout.HORIZONTAL);
+        actions.setGravity(Gravity.CENTER);
+        actions.setPadding(0, dp(10), 0, 0);
+
         Button unboundOnlyButton = smallButton("未绑定");
         styleButton(unboundOnlyButton, 0xffecfdf5, 0xff059669, 0xffbbf7d0);
-        panel.addView(unboundOnlyButton, fixedTop(ViewGroup.LayoutParams.MATCH_PARENT, dp(40), dp(10)));
+        actions.addView(unboundOnlyButton, new LinearLayout.LayoutParams(0, dp(38), 1));
+
+        Button closeButton = smallButton("关闭");
+        styleButton(closeButton, 0xfff8fafc, 0xff2563eb, 0xffcbd5e1);
+        LinearLayout.LayoutParams closeLp = new LinearLayout.LayoutParams(0, dp(38), 1);
+        closeLp.leftMargin = dp(10);
+        actions.addView(closeButton, closeLp);
+        panel.addView(actions);
 
         Runnable renderRows = () -> {
             renderAddMouldSensorPickerRows(rows, sensors, drafts, selectedSensors, picker, unboundOnly[0]);
@@ -7384,8 +7396,12 @@ public class MainActivity extends Activity {
         picker[0] = new AlertDialog.Builder(this)
                 .setTitle("选择传感器")
                 .setView(panel)
-                .setNegativeButton("关闭", null)
                 .create();
+        closeButton.setOnClickListener(v -> {
+            if (picker[0] != null) {
+                picker[0].dismiss();
+            }
+        });
         showStyledDialog(picker[0]);
     }
 
