@@ -9,6 +9,9 @@ import android.content.Context;
 import android.content.DialogInterface;
 import android.content.IntentFilter;
 import android.content.SharedPreferences;
+import android.content.pm.PackageInfo;
+import android.content.pm.PackageManager;
+import android.content.pm.Signature;
 import android.database.Cursor;
 import android.widget.CompoundButton;
 import android.app.Notification;
@@ -64,13 +67,14 @@ import android.widget.Toast;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
-import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileOutputStream;
 import java.io.InputStream;
-import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URLEncoder;
 import java.net.URL;
+import java.security.MessageDigest;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Calendar;
@@ -97,6 +101,12 @@ public class MainActivity extends Activity {
     private static final String PREF_OFFLINE_ALARM_MOULD_IDS = "offline_alarm_mould_ids";
     private static final String PREF_ALARM_MOULD_STATE_LOCK_PREFIX = "alarm_mould_state_lock_";
     private static final String PREF_LOWER_LIMIT_BACKUP_PREFIX = "lower_limit_backup_";
+    private static final String PREF_UPDATE_SHA256 = "update_sha256";
+    private static final String PREF_UPDATE_VERSION = "update_version";
+    private static final int MAX_CAPTCHA_BASE64_CHARS = 512 * 1024;
+    private static final int MAX_CAPTCHA_IMAGE_BYTES = 384 * 1024;
+    private static final int MAX_CAPTCHA_DIMENSION = 4096;
+    private static final long MAX_CAPTCHA_PIXELS = 4_000_000L;
     private static final Pattern SPEECH_CODE_TAIL = Pattern.compile("([A-Za-z]?\\d{2,5})$");
     private static final String GITHUB_RELEASE_API_URL =
             "https://api.github.com/repos/kun44133-dev/mitebo/releases/latest";
@@ -194,6 +204,7 @@ public class MainActivity extends Activity {
     private long updateDownloadId = -1L;
     private AlertDialog updateDownloadDialog;
     private UpdateInfo activeUpdateInfo;
+    private boolean updateVerificationInProgress = false;
     private boolean updateDownloadReceiverRegistered = false;
     private final BroadcastReceiver updateDownloadReceiver = new BroadcastReceiver() {
         @Override
@@ -289,7 +300,8 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        token = getSharedPreferences(PREFS, MODE_PRIVATE).getString("token", null);
+        token = SecurePreferences.get(this, PREFS, "token", null);
+        clearLegacyOfflineAlarmMouldCache();
         root = new FrameLayout(this);
         applyAdaptiveSystemBars();
         loading = new ProgressBar(this);
@@ -607,7 +619,7 @@ public class MainActivity extends Activity {
         panel.addView(tip, topMargin(dp(14)));
 
         TextView version = new TextView(this);
-        version.setText("作者 kunkun  版本号 1.0.92");
+        version.setText("作者 kunkun  版本号 1.0.93");
         version.setTextSize(13);
         version.setTextColor(0xffb7c9d9);
         version.setGravity(Gravity.CENTER);
@@ -663,7 +675,7 @@ public class MainActivity extends Activity {
 
     private JSONArray savedAccounts() {
         JSONArray result = new JSONArray();
-        String raw = getSharedPreferences(PREFS, MODE_PRIVATE).getString("saved_accounts", "");
+        String raw = SecurePreferences.get(this, PREFS, "saved_accounts", "");
         try {
             if (raw.length() > 0) {
                 result = new JSONArray(raw);
@@ -672,7 +684,7 @@ public class MainActivity extends Activity {
             result = new JSONArray();
         }
         String legacyUser = getSharedPreferences(PREFS, MODE_PRIVATE).getString("saved_username", "");
-        String legacyPass = getSharedPreferences(PREFS, MODE_PRIVATE).getString("saved_password", "");
+        String legacyPass = SecurePreferences.get(this, PREFS, "saved_password", "");
         if (legacyUser.length() > 0 && savedPasswordFor(result, legacyUser).length() == 0) {
             try {
                 JSONObject account = new JSONObject();
@@ -734,9 +746,7 @@ public class MainActivity extends Activity {
                 }
                 next.put(account);
             }
-            getSharedPreferences(PREFS, MODE_PRIVATE).edit()
-                    .putString("saved_accounts", next.toString())
-                    .apply();
+            SecurePreferences.put(this, PREFS, "saved_accounts", next.toString());
         } catch (Exception ignored) {
         }
     }
@@ -765,6 +775,7 @@ public class MainActivity extends Activity {
     }
 
     private void loadCaptcha() {
+        captchaUuid = "";
         setLoading(true);
         new ApiTask("GET", "/captchaImage", null, false, result -> {
             setLoading(false);
@@ -774,16 +785,58 @@ public class MainActivity extends Activity {
             }
             try {
                 JSONObject json = new JSONObject(result.body);
-                captchaUuid = json.optString("uuid");
-                String img = json.optString("img");
-                byte[] bytes = Base64.decode(img, Base64.DEFAULT);
-                Bitmap bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.length);
-                Bitmap scaled = Bitmap.createScaledBitmap(bitmap, dp(126), dp(50), true);
+                String uuid = json.optString("uuid").trim();
+                if (uuid.length() == 0) {
+                    throw new IllegalArgumentException("captcha uuid missing");
+                }
+                Bitmap scaled = decodeCaptchaBitmap(json.optString("img"));
+                captchaUuid = uuid;
                 captchaView.setImageBitmap(scaled);
-            } catch (Exception e) {
-                toast("验证码解析失败");
+            } catch (Exception | OutOfMemoryError e) {
+                captchaUuid = "";
+                captchaView.setImageDrawable(null);
+                toast("验证码图片异常，请点击刷新");
             }
         }).execute();
+    }
+
+    private Bitmap decodeCaptchaBitmap(String encoded) {
+        if (encoded == null || encoded.length() == 0 || encoded.length() > MAX_CAPTCHA_BASE64_CHARS) {
+            throw new IllegalArgumentException("captcha data size invalid");
+        }
+        byte[] bytes = Base64.decode(encoded, Base64.DEFAULT);
+        if (bytes.length == 0 || bytes.length > MAX_CAPTCHA_IMAGE_BYTES) {
+            throw new IllegalArgumentException("captcha image size invalid");
+        }
+        BitmapFactory.Options bounds = new BitmapFactory.Options();
+        bounds.inJustDecodeBounds = true;
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.length, bounds);
+        long pixels = (long) bounds.outWidth * (long) bounds.outHeight;
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0
+                || bounds.outWidth > MAX_CAPTCHA_DIMENSION
+                || bounds.outHeight > MAX_CAPTCHA_DIMENSION
+                || pixels <= 0 || pixels > MAX_CAPTCHA_PIXELS) {
+            throw new IllegalArgumentException("captcha dimensions invalid");
+        }
+        int targetWidth = Math.max(1, dp(126));
+        int targetHeight = Math.max(1, dp(50));
+        int sampleSize = 1;
+        while (bounds.outWidth / (sampleSize * 2) >= targetWidth
+                && bounds.outHeight / (sampleSize * 2) >= targetHeight) {
+            sampleSize *= 2;
+        }
+        BitmapFactory.Options decode = new BitmapFactory.Options();
+        decode.inSampleSize = sampleSize;
+        decode.inPreferredConfig = Bitmap.Config.RGB_565;
+        Bitmap bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.length, decode);
+        if (bitmap == null) {
+            throw new IllegalArgumentException("captcha decode failed");
+        }
+        Bitmap scaled = Bitmap.createScaledBitmap(bitmap, targetWidth, targetHeight, true);
+        if (scaled != bitmap) {
+            bitmap.recycle();
+        }
+        return scaled;
     }
 
     private void login() {
@@ -818,11 +871,15 @@ public class MainActivity extends Activity {
                             saveAccountPassword(username, password);
                         }
                         getSharedPreferences(PREFS, MODE_PRIVATE).edit()
-                                .putString("token", token)
                                 .putString("saved_username", username)
                                 .putBoolean("remember_password", remember)
-                                .putString("saved_password", remember ? password : "")
                                 .apply();
+                        SecurePreferences.put(this, PREFS, "token", token);
+                        if (remember) {
+                            SecurePreferences.put(this, PREFS, "saved_password", password);
+                        } else {
+                            SecurePreferences.remove(this, PREFS, "saved_password");
+                        }
                         if (!username.equals(previousUser)) {
                             resetAlarmSessionState();
                             macSearchInput = null;
@@ -1033,7 +1090,7 @@ public class MainActivity extends Activity {
             try {
                 JSONObject json = new JSONObject(result.body);
                 if (json.optInt("code", 200) == 401) {
-                    getSharedPreferences(PREFS, MODE_PRIVATE).edit().remove("token").apply();
+                    SecurePreferences.remove(this, PREFS, "token");
                     token = null;
                     toast("登录已过期，请重新登录");
                     showLogin();
@@ -3009,7 +3066,7 @@ public class MainActivity extends Activity {
         exit.setOnClickListener(v -> {
             stopAlarmMonitorService();
             resetAlarmSessionState();
-            getSharedPreferences(PREFS, MODE_PRIVATE).edit().remove("token").apply();
+            SecurePreferences.remove(this, PREFS, "token");
             token = null;
             showLogin();
         });
@@ -3136,7 +3193,7 @@ public class MainActivity extends Activity {
                 update.error = "检查更新失败：" + responseCode;
                 return update;
             }
-            JSONObject release = new JSONObject(readAll(connection.getInputStream()));
+            JSONObject release = new JSONObject(readAll(connection, connection.getInputStream()));
             update.version = release.optString("tag_name").replaceFirst("^[vV]", "");
             update.notes = release.optString("body", "");
             JSONArray assets = release.optJSONArray("assets");
@@ -3145,6 +3202,7 @@ public class MainActivity extends Activity {
                     JSONObject asset = assets.optJSONObject(i);
                     String name = asset == null ? "" : asset.optString("name");
                     if (name.toLowerCase(java.util.Locale.ROOT).endsWith(".apk")) {
+                        update.sha256 = normalizedSha256(asset.optString("digest"));
                         update.downloadUrls.addAll(githubDownloadUrls(asset.optString("browser_download_url")));
                         break;
                     }
@@ -3152,6 +3210,8 @@ public class MainActivity extends Activity {
             }
             if (update.version.length() == 0 || update.downloadUrls.size() == 0) {
                 update.error = "最新版本未提供 APK 安装包";
+            } else if (update.sha256.length() == 0) {
+                update.error = "最新版本缺少安装包校验信息";
             }
         } catch (Exception ignored) {
             update.error = "检查更新失败，请检查网络";
@@ -3175,6 +3235,17 @@ public class MainActivity extends Activity {
             }
         }
         return 0;
+    }
+
+    private String normalizedSha256(String digest) {
+        if (digest == null) {
+            return "";
+        }
+        String value = digest.trim().toLowerCase(Locale.ROOT);
+        if (value.startsWith("sha256:")) {
+            value = value.substring("sha256:".length());
+        }
+        return value.matches("[a-f0-9]{64}") ? value : "";
     }
 
     private int integerPrefix(String value) {
@@ -3227,7 +3298,7 @@ public class MainActivity extends Activity {
     private void enqueueUpdateDownload(DownloadManager manager, UpdateInfo update, boolean retrying) {
         try {
             String downloadUrl = update.currentDownloadUrl();
-            if (downloadUrl.length() == 0) {
+            if (downloadUrl.length() == 0 || update.sha256.length() == 0) {
                 toast("无法启动更新下载");
                 return;
             }
@@ -3241,6 +3312,10 @@ public class MainActivity extends Activity {
             request.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
             request.setDestinationInExternalFilesDir(this, Environment.DIRECTORY_DOWNLOADS, fileName);
             updateDownloadId = manager.enqueue(request);
+            getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                    .putString(PREF_UPDATE_SHA256, update.sha256)
+                    .putString(PREF_UPDATE_VERSION, update.version)
+                    .apply();
             showUpdateDownloadDialog(update.version, manager, retrying);
             refreshHandler.removeCallbacks(updateDownloadPoller);
             refreshHandler.post(updateDownloadPoller);
@@ -3268,6 +3343,10 @@ public class MainActivity extends Activity {
                     }
                     updateDownloadId = -1L;
                     activeUpdateInfo = null;
+                    getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                            .remove(PREF_UPDATE_SHA256)
+                            .remove(PREF_UPDATE_VERSION)
+                            .apply();
                     refreshHandler.removeCallbacks(updateDownloadPoller);
                 })
                 .create();
@@ -3359,6 +3438,10 @@ public class MainActivity extends Activity {
         if (!success && message.length() > 0) {
             updateDownloadId = -1L;
             activeUpdateInfo = null;
+            getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                    .remove(PREF_UPDATE_SHA256)
+                    .remove(PREF_UPDATE_VERSION)
+                    .apply();
             toast(message);
         }
     }
@@ -3383,6 +3466,9 @@ public class MainActivity extends Activity {
     }
 
     private void installDownloadedUpdate(long downloadId) {
+        if (updateVerificationInProgress) {
+            return;
+        }
         refreshHandler.removeCallbacks(updateDownloadPoller);
         if (updateDownloadDialog != null) {
             updateDownloadDialog.dismiss();
@@ -3400,6 +3486,127 @@ public class MainActivity extends Activity {
             toast("更新下载失败，请重新检查更新");
             return;
         }
+        String expectedSha256 = activeUpdateInfo == null
+                ? getSharedPreferences(PREFS, MODE_PRIVATE).getString(PREF_UPDATE_SHA256, "")
+                : activeUpdateInfo.sha256;
+        String expectedVersion = activeUpdateInfo == null
+                ? getSharedPreferences(PREFS, MODE_PRIVATE).getString(PREF_UPDATE_VERSION, "")
+                : activeUpdateInfo.version;
+        if (normalizedSha256(expectedSha256).length() == 0 || expectedVersion.length() == 0) {
+            rejectDownloadedUpdate(manager, downloadId, "更新包缺少校验信息，请重新检查更新");
+            return;
+        }
+        updateVerificationInProgress = true;
+        toast("正在验证更新安装包");
+        new AsyncTask<Void, Void, String>() {
+            @Override
+            protected String doInBackground(Void... ignored) {
+                return verifyDownloadedUpdate(apkUri, expectedSha256, expectedVersion);
+            }
+
+            @Override
+            protected void onPostExecute(String error) {
+                updateVerificationInProgress = false;
+                if (error.length() > 0) {
+                    rejectDownloadedUpdate(manager, downloadId, error);
+                    return;
+                }
+                openVerifiedUpdateInstaller(apkUri);
+            }
+        }.execute();
+    }
+
+    private String verifyDownloadedUpdate(Uri apkUri, String expectedSha256, String expectedVersion) {
+        File inspectionFile = new File(getCacheDir(), "verified-update.apk");
+        try (InputStream input = getContentResolver().openInputStream(apkUri);
+             FileOutputStream output = new FileOutputStream(inspectionFile, false)) {
+            if (input == null) {
+                return "无法读取更新安装包";
+            }
+            MessageDigest fileDigest = MessageDigest.getInstance("SHA-256");
+            byte[] buffer = new byte[16 * 1024];
+            long total = 0;
+            int read;
+            while ((read = input.read(buffer)) != -1) {
+                total += read;
+                if (total > 512L * 1024L * 1024L) {
+                    return "更新安装包大小异常";
+                }
+                fileDigest.update(buffer, 0, read);
+                output.write(buffer, 0, read);
+            }
+            output.flush();
+            if (!normalizedSha256(expectedSha256).equals(hex(fileDigest.digest()))) {
+                return "更新安装包校验失败，已阻止安装";
+            }
+
+            int flags = Build.VERSION.SDK_INT >= 28
+                    ? PackageManager.GET_SIGNING_CERTIFICATES
+                    : PackageManager.GET_SIGNATURES;
+            PackageInfo archive = getPackageManager().getPackageArchiveInfo(inspectionFile.getAbsolutePath(), flags);
+            PackageInfo installed = getPackageManager().getPackageInfo(getPackageName(), flags);
+            if (archive == null || !getPackageName().equals(archive.packageName)) {
+                return "更新安装包应用标识不匹配";
+            }
+            String archiveVersion = archive.versionName == null ? "" : archive.versionName;
+            if (!expectedVersion.equals(archiveVersion)) {
+                return "更新安装包版本与发布信息不匹配";
+            }
+            Set<String> archiveSigners = signingCertificateDigests(archive);
+            Set<String> installedSigners = signingCertificateDigests(installed);
+            if (archiveSigners.isEmpty() || !archiveSigners.equals(installedSigners)) {
+                return "更新安装包签名不匹配，已阻止安装";
+            }
+            return "";
+        } catch (Exception ignored) {
+            return "更新安装包安全验证失败";
+        } finally {
+            if (inspectionFile.exists()) {
+                inspectionFile.delete();
+            }
+        }
+    }
+
+    private Set<String> signingCertificateDigests(PackageInfo info) throws Exception {
+        Set<String> result = new HashSet<>();
+        Signature[] signatures;
+        if (Build.VERSION.SDK_INT >= 28) {
+            signatures = info.signingInfo == null ? null : info.signingInfo.getApkContentsSigners();
+        } else {
+            signatures = info.signatures;
+        }
+        if (signatures == null) {
+            return result;
+        }
+        for (Signature signature : signatures) {
+            result.add(hex(MessageDigest.getInstance("SHA-256").digest(signature.toByteArray())));
+        }
+        return result;
+    }
+
+    private String hex(byte[] bytes) {
+        StringBuilder builder = new StringBuilder(bytes.length * 2);
+        for (byte value : bytes) {
+            builder.append(String.format(Locale.ROOT, "%02x", value & 0xff));
+        }
+        return builder.toString();
+    }
+
+    private void rejectDownloadedUpdate(DownloadManager manager, long downloadId, String message) {
+        try {
+            manager.remove(downloadId);
+        } catch (Exception ignored) {
+        }
+        updateDownloadId = -1L;
+        activeUpdateInfo = null;
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                .remove(PREF_UPDATE_SHA256)
+                .remove(PREF_UPDATE_VERSION)
+                .apply();
+        toast(message);
+    }
+
+    private void openVerifiedUpdateInstaller(Uri apkUri) {
         if (Build.VERSION.SDK_INT >= 26 && !getPackageManager().canRequestPackageInstalls()) {
             showInstallPermissionDialog();
             return;
@@ -3412,6 +3619,10 @@ public class MainActivity extends Activity {
             intent.putExtra(Intent.EXTRA_NOT_UNKNOWN_SOURCE, true);
             updateDownloadId = -1L;
             activeUpdateInfo = null;
+            getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                    .remove(PREF_UPDATE_SHA256)
+                    .remove(PREF_UPDATE_VERSION)
+                    .apply();
             startActivity(intent);
         } catch (Exception ignored) {
             toast("无法打开安装界面");
@@ -3447,9 +3658,9 @@ public class MainActivity extends Activity {
         boolean offlineAlarmSound = prefs.getBoolean(PREF_OFFLINE_MOULD_ALARM_SOUND, false);
         boolean backgroundMonitor = prefs.getBoolean(PREF_BACKGROUND_ALARM_MONITOR, false);
         String pressureUnit = prefs.getString(PREF_PRESSURE_UNIT, "bar");
-        String savedAccounts = prefs.getString("saved_accounts", "");
+        String savedAccounts = SecurePreferences.get(this, PREFS, "saved_accounts", "");
         String savedUsername = prefs.getString("saved_username", "");
-        String savedPassword = prefs.getString("saved_password", "");
+        String savedPassword = SecurePreferences.get(this, PREFS, "saved_password", "");
         boolean rememberPassword = prefs.getBoolean("remember_password", false);
 
         SharedPreferences.Editor editor = prefs.edit().clear()
@@ -3459,14 +3670,14 @@ public class MainActivity extends Activity {
                 .putBoolean(PREF_OFFLINE_MOULD_ALARM_SOUND, offlineAlarmSound)
                 .putBoolean(PREF_BACKGROUND_ALARM_MONITOR, backgroundMonitor)
                 .putString(PREF_PRESSURE_UNIT, pressureUnit)
-                .putString("saved_accounts", savedAccounts)
                 .putString("saved_username", savedUsername)
-                .putString("saved_password", savedPassword)
                 .putBoolean("remember_password", rememberPassword);
         if (alarmSoundUri != null) {
             editor.putString(PREF_ALARM_SOUND_URI, alarmSoundUri);
         }
         editor.apply();
+        SecurePreferences.put(this, PREFS, "saved_accounts", savedAccounts);
+        SecurePreferences.put(this, PREFS, "saved_password", savedPassword);
 
         token = null;
         macSearchInput = null;
@@ -4172,10 +4383,14 @@ public class MainActivity extends Activity {
             }
             builder.append(id);
         }
-        getSharedPreferences(PREFS, MODE_PRIVATE).edit()
-                .putString(offlineAlarmMouldIdsKey(), builder.toString())
-                .putString(PREF_OFFLINE_ALARM_MOULD_IDS, builder.toString())
-                .apply();
+        String accountKey = offlineAlarmMouldIdsKey();
+        SharedPreferences.Editor editor = getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                .remove(PREF_OFFLINE_ALARM_MOULD_IDS)
+                .remove(PREF_OFFLINE_ALARM_MOULD_IDS + "_guest");
+        if (accountKey.length() > 0) {
+            editor.putString(accountKey, builder.toString());
+        }
+        editor.apply();
         offlineAlarmMouldIdsRestored = true;
     }
 
@@ -4185,10 +4400,12 @@ public class MainActivity extends Activity {
         }
         offlineAlarmMouldIds.clear();
         SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
-        String saved = prefs.getString(offlineAlarmMouldIdsKey(), "");
-        if (saved.length() == 0) {
-            saved = prefs.getString(PREF_OFFLINE_ALARM_MOULD_IDS, "");
-        }
+        String accountKey = offlineAlarmMouldIdsKey();
+        String saved = accountKey.length() == 0 ? "" : prefs.getString(accountKey, "");
+        prefs.edit()
+                .remove(PREF_OFFLINE_ALARM_MOULD_IDS)
+                .remove(PREF_OFFLINE_ALARM_MOULD_IDS + "_guest")
+                .apply();
         if (saved.length() > 0) {
             String[] ids = saved.split(",");
             for (String id : ids) {
@@ -4204,10 +4421,17 @@ public class MainActivity extends Activity {
     private String offlineAlarmMouldIdsKey() {
         String account = currentAccountName();
         if (account.length() == 0) {
-            return PREF_OFFLINE_ALARM_MOULD_IDS + "_guest";
+            return "";
         }
         String safe = account.replaceAll("[^A-Za-z0-9_@.-]", "_");
         return PREF_OFFLINE_ALARM_MOULD_IDS + "_" + safe + "_" + Integer.toHexString(account.hashCode());
+    }
+
+    private void clearLegacyOfflineAlarmMouldCache() {
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                .remove(PREF_OFFLINE_ALARM_MOULD_IDS)
+                .remove(PREF_OFFLINE_ALARM_MOULD_IDS + "_guest")
+                .apply();
     }
 
     private void updateStaticPressure(JSONObject device) {
@@ -8958,6 +9182,7 @@ public class MainActivity extends Activity {
     private static class UpdateInfo {
         String version = "";
         String notes = "";
+        String sha256 = "";
         List<String> downloadUrls = new ArrayList<>();
         int downloadUrlIndex = 0;
         String error = "";
@@ -9173,9 +9398,12 @@ public class MainActivity extends Activity {
                 }
                 int code = connection.getResponseCode();
                 InputStream stream = code >= 200 && code < 400 ? connection.getInputStream() : connection.getErrorStream();
-                result.body = readAll(stream);
+                result.body = readAll(connection, stream);
                 result.ok = code >= 200 && code < 400;
                 result.message = result.ok ? "" : "请求失败：" + code;
+            } catch (ResponseSizeLimiter.ResponseTooLargeException e) {
+                result.ok = false;
+                result.message = "服务器响应过大，已停止加载";
             } catch (Exception e) {
                 result.ok = false;
                 result.message = "网络请求失败";
@@ -9216,7 +9444,7 @@ public class MainActivity extends Activity {
                 os.close();
             }
             InputStream stream = connection.getResponseCode() >= 400 ? connection.getErrorStream() : connection.getInputStream();
-            return new JSONObject(readAll(stream));
+            return new JSONObject(readAll(connection, stream));
         } finally {
             if (connection != null) {
                 connection.disconnect();
@@ -9285,17 +9513,7 @@ public class MainActivity extends Activity {
         return false;
     }
 
-    private static String readAll(InputStream stream) throws Exception {
-        if (stream == null) {
-            return "";
-        }
-        BufferedReader reader = new BufferedReader(new InputStreamReader(stream, "UTF-8"));
-        StringBuilder builder = new StringBuilder();
-        String line;
-        while ((line = reader.readLine()) != null) {
-            builder.append(line);
-        }
-        reader.close();
-        return builder.toString();
+    private static String readAll(HttpURLConnection connection, InputStream stream) throws Exception {
+        return ResponseSizeLimiter.readUtf8(connection, stream);
     }
 }

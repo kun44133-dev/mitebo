@@ -23,9 +23,7 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 import org.json.JSONTokener;
 
-import java.io.BufferedReader;
 import java.io.InputStream;
-import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.text.SimpleDateFormat;
@@ -98,6 +96,7 @@ public class AlarmMonitorService extends Service {
     @Override
     public void onCreate() {
         super.onCreate();
+        clearLegacyOfflineMouldCache();
         ensureChannels();
     }
 
@@ -233,7 +232,7 @@ public class AlarmMonitorService extends Service {
                 connection.setRequestProperty("Authorization", "Bearer " + token);
                 int code = connection.getResponseCode();
                 InputStream stream = code >= 200 && code < 400 ? connection.getInputStream() : connection.getErrorStream();
-                String body = readAll(stream);
+                String body = readAll(connection, stream);
                 if (code < 200 || code >= 400) {
                     throw new Exception("alarm request failed");
                 }
@@ -430,10 +429,11 @@ public class AlarmMonitorService extends Service {
     }
 
     private boolean isKnownOfflineMould(String mouldId) {
-        String saved = prefs().getString(offlineAlarmMouldIdsKey(), "");
-        if (saved.length() == 0) {
-            saved = prefs().getString(PREF_OFFLINE_ALARM_MOULD_IDS, "");
+        String accountKey = offlineAlarmMouldIdsKey();
+        if (accountKey.length() == 0) {
+            return false;
         }
+        String saved = prefs().getString(accountKey, "");
         if (saved.length() == 0) {
             return false;
         }
@@ -449,10 +449,17 @@ public class AlarmMonitorService extends Service {
     private String offlineAlarmMouldIdsKey() {
         String account = currentAccountName();
         if (account.length() == 0) {
-            return PREF_OFFLINE_ALARM_MOULD_IDS + "_guest";
+            return "";
         }
         String safe = account.replaceAll("[^A-Za-z0-9_@.-]", "_");
         return PREF_OFFLINE_ALARM_MOULD_IDS + "_" + safe + "_" + Integer.toHexString(account.hashCode());
+    }
+
+    private void clearLegacyOfflineMouldCache() {
+        prefs().edit()
+                .remove(PREF_OFFLINE_ALARM_MOULD_IDS)
+                .remove(PREF_OFFLINE_ALARM_MOULD_IDS + "_guest")
+                .apply();
     }
 
     private String currentAccountName() {
@@ -1013,7 +1020,7 @@ public class AlarmMonitorService extends Service {
     }
 
     private String token() {
-        return prefs().getString("token", "");
+        return SecurePreferences.get(this, PREFS, "token", "");
     }
 
     private SharedPreferences prefs() {
@@ -1075,18 +1082,8 @@ public class AlarmMonitorService extends Service {
                 || "true".equalsIgnoreCase(value);
     }
 
-    private String readAll(InputStream stream) throws Exception {
-        if (stream == null) {
-            return "";
-        }
-        BufferedReader reader = new BufferedReader(new InputStreamReader(stream, "UTF-8"));
-        StringBuilder builder = new StringBuilder();
-        String line;
-        while ((line = reader.readLine()) != null) {
-            builder.append(line);
-        }
-        reader.close();
-        return builder.toString();
+    private String readAll(HttpURLConnection connection, InputStream stream) throws Exception {
+        return ResponseSizeLimiter.readUtf8(connection, stream);
     }
 
     private static class AlarmPollResult {

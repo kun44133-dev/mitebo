@@ -2,6 +2,37 @@
 
 本文件用于持续记录 App 的每次功能、界面和稳定性修改。最新记录放在最上方。
 
+## 2026-08-01
+
+### 打包版本 1.0.93
+
+- `versionCode` 更新为 `93`，`versionName` 和登录页版本号更新为 `1.0.93`。
+- 本次安装包包含网络响应、验证码内存保护及多账号离线模具告警缓存隔离修复。
+
+### 网络响应与验证码内存保护
+
+- 普通接口、后台告警轮询和更新元数据响应统一限制为最多 `8MB`，同时校验服务器声明长度和实际读取字节数。
+- 超限响应会立即停止读取并显示明确错误，不再持续扩展字符串造成内存耗尽。
+- 验证码增加 Base64 长度、解码字节、图片长宽和总像素限制，并按显示尺寸采样解码，降低位图内存占用。
+- 验证码异常或内存不足时清空旧验证码状态并提示刷新，避免继续使用失效验证码。
+- 影响文件：`app/src/main/java/cn/mitebo/iot/ResponseSizeLimiter.java`、`app/src/main/java/cn/mitebo/iot/MainActivity.java`、`app/src/main/java/cn/mitebo/iot/AlarmMonitorService.java`。
+
+### 多账号离线模具告警隔离
+
+- 离线模具缓存仅按当前登录账号的专属键保存和读取，不再写入或回退读取全局缓存。
+- 未登录或账号名为空时不读取共享缓存，避免旧账号的离线模具状态影响新账号的报警声音判断。
+- App 与后台告警服务启动时清理旧版全局及 `guest` 离线模具缓存；已有账号专属缓存继续保留。
+- 账号切换时继续清空当前进程内的告警与离线模具状态，再由新账号数据重新建立。
+- 影响文件：`app/src/main/java/cn/mitebo/iot/MainActivity.java`、`app/src/main/java/cn/mitebo/iot/AlarmMonitorService.java`。
+
+### 登录凭据与应用更新安全加固
+
+- 保存的多账号密码、兼容密码字段和登录令牌改用 Android Keystore AES-GCM 加密，旧版明文数据在首次读取时自动迁移。
+- 关闭 Android 应用数据备份，避免凭据跟随系统备份或设备迁移导出。
+- 应用更新读取 GitHub Release 资产的 SHA-256，下载完成后同时校验文件摘要、应用包名、版本号和当前安装包签名证书；任一校验失败都会删除安装包并阻止安装。
+- HTTPS 客户端切换暂未启用：实测 `https://iot.mitebo.cn` 的 443 端口无法连接，服务器启用有效 TLS 后才能在不破坏登录和业务操作的前提下关闭 HTTP。
+- 影响文件：`app/src/main/java/cn/mitebo/iot/SecurePreferences.java`、`app/src/main/java/cn/mitebo/iot/MainActivity.java`、`app/src/main/java/cn/mitebo/iot/AlarmMonitorService.java`、`app/src/main/AndroidManifest.xml`。
+
 ## 2026-07-31
 
 ### 打包版本 1.0.92
